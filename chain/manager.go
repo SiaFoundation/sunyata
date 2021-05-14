@@ -256,20 +256,18 @@ func (m *Manager) AddTransactions(index sunyata.ChainIndex, blocks [][]sunyata.T
 	var chain *consensus.ScratchChain
 	for _, sc := range m.chains {
 		if !sc.FullyValidated() && sc.ValidTip().Height >= (index.Height-1) && sc.Contains(index) {
-			// the chain may already contain some of the supplied blocks; ignore
-			// the ones we already have
-			have := sc.ValidTip().Height - (index.Height - 1)
-			blocks = blocks[have:]
-			if chain != nil {
-				continue
-			}
 			chain = sc
+			break
 		}
-
 	}
 	if chain == nil {
 		return nil, fmt.Errorf("index %v does not attach to any known chain: %w", index, ErrUnknownIndex)
 	}
+
+	// the chain may already contain some of the supplied blocks; ignore
+	// the ones we already have
+	have := chain.ValidTip().Height - (index.Height - 1)
+	blocks = blocks[have:]
 
 	for _, txns := range blocks {
 		c, err := chain.ApplyBlockTransactions(txns)

@@ -129,10 +129,7 @@ func (s *Syncer) processMsgHeaders(p *Peer, msg *MsgHeaders) {
 	}
 	if newBest == nil {
 		// request the next set of headers
-		last := []sunyata.ChainIndex{{
-			Height: msg.Headers[len(msg.Headers)-1].Height,
-			ID:     msg.Headers[len(msg.Headers)-1].ID(),
-		}}
+		last := []sunyata.ChainIndex{msg.Headers[len(msg.Headers)-1].Index()}
 		p.queue(&MsgGetHeaders{History: last})
 		return
 	}
@@ -194,7 +191,12 @@ func (s *Syncer) processMsgTransactions(p *Peer, msg *MsgTransactions) {
 			blocks = blocks[:10]
 		}
 		p.queue(&MsgGetTransactions{Blocks: blocks})
+		return
 	}
+
+	// request the next set of headers, if there is one
+	tip := []sunyata.ChainIndex{sc.ValidTip()}
+	p.queue(&MsgGetHeaders{History: tip})
 }
 
 func (s *Syncer) processMsgRelayBlock(p *Peer, msg *MsgRelayBlock) {

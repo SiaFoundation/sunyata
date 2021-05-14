@@ -226,7 +226,7 @@ func TestMsgTransactions(t *testing.T) {
 	outbox := testPeerResponse(t, n.s, &MsgHeaders{
 		Headers: chainutil.JustHeaders(sim.Chain[:3]),
 	})
-	exp := &MsgGetTransactions{
+	var exp Message = &MsgGetTransactions{
 		Blocks: chainutil.JustChainIndexes(sim.Chain[:3]),
 	}
 	if !reflect.DeepEqual(outbox, exp) {
@@ -241,8 +241,11 @@ func TestMsgTransactions(t *testing.T) {
 		Index:  sim.Chain[0].Index(),
 		Blocks: chainutil.JustTransactions(sim.Chain[0:3]),
 	})
-	if outbox != nil {
-		t.Fatal("expected empty outbox, got", outbox)
+	exp = &MsgGetHeaders{
+		History: chainutil.JustChainIndexes(sim.Chain[2:3]),
+	}
+	if !reflect.DeepEqual(outbox, exp) {
+		t.Errorf("\nexpected:\n\t%#v\ngot:\n\t%#v\n", exp, outbox)
 	}
 	if n.c.Tip().Height != 3 {
 		t.Fatal("should have reorged")
@@ -328,14 +331,14 @@ func TestMultiplePeers(t *testing.T) {
 		Headers: chainutil.JustHeaders(sim.Chain),
 	})
 	if _, ok := outbox.(*MsgGetTransactions); !ok {
-		t.Fatal("expected MsgGetTransactions")
+		t.Error("expected MsgGetTransactions")
 	}
 	outbox = testPeerResponse(t, n.s, &MsgTransactions{
 		Index:  sim.Chain[0].Index(),
 		Blocks: chainutil.JustTransactions(sim.Chain),
 	})
-	if outbox != nil {
-		t.Fatal("expected nil")
+	if _, ok := outbox.(*MsgGetHeaders); !ok {
+		t.Error("expected MsgGetHeaders")
 	}
 
 	// mine two diverging chains
@@ -360,7 +363,7 @@ func TestMultiplePeers(t *testing.T) {
 		Headers: chainutil.JustHeaders(blocks2),
 	})
 	if _, ok := outbox.(*MsgGetTransactions); !ok {
-		t.Fatal("expected MsgGetTransactions")
+		t.Error("expected MsgGetTransactions")
 	}
 
 	// send headers1, then blocks1
@@ -368,14 +371,14 @@ func TestMultiplePeers(t *testing.T) {
 		Headers: chainutil.JustHeaders(blocks1),
 	})
 	if _, ok := outbox.(*MsgGetTransactions); !ok {
-		t.Fatal("expected MsgGetTransactions")
+		t.Error("expected MsgGetTransactions")
 	}
 	outbox = testPeerResponse(t, n.s, &MsgTransactions{
 		Index:  blocks1[0].Index(),
 		Blocks: chainutil.JustTransactions(blocks1),
 	})
-	if outbox != nil {
-		t.Fatal("expected nil")
+	if _, ok := outbox.(*MsgGetHeaders); !ok {
+		t.Error("expected MsgGetHeaders")
 	}
 
 	// should have reorged to chain1
@@ -396,8 +399,8 @@ func TestMultiplePeers(t *testing.T) {
 		Index:  blocks2[0].Index(),
 		Blocks: chainutil.JustTransactions(blocks2),
 	})
-	if outbox != nil {
-		t.Fatal("expected nil")
+	if _, ok := outbox.(*MsgGetHeaders); !ok {
+		t.Error("expected MsgGetHeaders")
 	}
 
 	// should have reorged to chain2
