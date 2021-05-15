@@ -12,21 +12,6 @@ import (
 	"go.sia.tech/sunyata"
 )
 
-const (
-	// MedianTimestampWindow is the number of blocks used when computing the median
-	// timestamp.
-	MedianTimestampWindow = 11
-
-	maxFutureBlockTime = 2 * time.Hour
-
-	// MaxBlockWeight is the maximum "weight" of a valid block. A block's weight is
-	// the sum of the weights of its transactions. The weight of a transaction is
-	// given by:
-	//
-	//   weight := 4*inputs + outputs
-	MaxBlockWeight = 100e3
-)
-
 var (
 	// ErrFutureBlock is returned by AppendHeader if a block's timestamp is too far
 	// in the future. The block may be valid at a later time.
@@ -42,26 +27,75 @@ var (
 // implementation whose constructor returns a concrete type.
 var hasherPool = &sync.Pool{New: func() interface{} { return sunyata.NewHasher() }}
 
+// ValidationContext contains the necessary context to fully validate a block.
+type ValidationContext struct {
+	Index          sunyata.ChainIndex
+	State          StateAccumulator
+	TotalWork      sunyata.Work
+	Difficulty     sunyata.Work
+	LastAdjust     time.Time
+	PrevTimestamps [11]time.Time
+}
+
+// BlockReward returns the reward for mining a child block.
+func (vc *ValidationContext) BlockReward() sunyata.Currency {
+	r := sunyata.BaseUnitsPerCoin.Mul64(50)
+	n := (vc.Index.Height + 1) / 210000
+	return sunyata.NewCurrency(r.Lo>>n|r.Hi<<(64-n), r.Hi>>n) // r >> n
+}
+
+// BlockRewardTimelock is the height at which a child block's reward becomes
+// spendable.
+func (vc *ValidationContext) BlockRewardTimelock() uint64 {
+	return (vc.Index.Height + 1) + 144
+}
+
+// MaxBlockWeight is the maximum "weight" of a valid child block.
+func (vc *ValidationContext) MaxBlockWeight() uint64 {
+	return 100e3
+}
+
 // TransactionWeight computes the weight of a txn.
-func TransactionWeight(txn sunyata.Transaction) uint64 {
+func (vc *ValidationContext) TransactionWeight(txn sunyata.Transaction) uint64 {
 	return uint64(4*len(txn.Inputs) + len(txn.Outputs))
 }
 
 // BlockWeight computes the combined weight of a block's txns.
-func BlockWeight(txns []sunyata.Transaction) uint64 {
+func (vc *ValidationContext) BlockWeight(txns []sunyata.Transaction) uint64 {
 	var weight uint64
 	for _, txn := range txns {
-		weight += TransactionWeight(txn)
+		weight += vc.TransactionWeight(txn)
 	}
 	return weight
 }
 
-// TransactionsHash computes the hash of a set of Transactions.
-func TransactionsHash(txns []sunyata.Transaction) sunyata.Hash256 {
+// Commitment computes the commitment hash for a child block.
+func (vc *ValidationContext) Commitment(minerAddr sunyata.Address, txns []sunyata.Transaction) sunyata.Hash256 {
 	h := hasherPool.Get().(*sunyata.Hasher)
 	defer hasherPool.Put(h)
 	h.Reset()
 
+	// instead of hashing all the data together, hash vc and txns separately;
+	// this makes it possible to cheaply verify *just* the txns, or *just* the
+	// minerAddr, etc.
+
+	h.WriteUint64(vc.Index.Height)
+	h.WriteHash(vc.Index.ID)
+	h.WriteUint64(vc.State.NumLeaves)
+	for i, root := range vc.State.Trees {
+		if vc.State.HasTreeAtHeight(i) {
+			h.WriteHash(root)
+		}
+	}
+	h.WriteHash(vc.TotalWork.NumHashes)
+	h.WriteHash(vc.Difficulty.NumHashes)
+	h.WriteTime(vc.LastAdjust)
+	for _, ts := range vc.PrevTimestamps {
+		h.WriteTime(ts)
+	}
+	ctxHash := h.Sum()
+
+	h.Reset()
 	for _, txn := range txns {
 		for _, in := range txn.Inputs {
 			h.WriteHash(in.Parent.ID.TransactionID)
@@ -82,26 +116,30 @@ func TransactionsHash(txns []sunyata.Transaction) sunyata.Hash256 {
 		}
 		h.WriteCurrency(txn.MinerFee)
 	}
+	txnsHash := h.Sum()
+
+	h.Reset()
+	h.WriteHash(ctxHash)
+	h.WriteHash(txnsHash)
+	h.WriteHash(minerAddr)
 	return h.Sum()
 }
 
-// ComputeCommitment computes the commitment hash for a block.
-func ComputeCommitment(minerAddr sunyata.Address, txns sunyata.Hash256, context sunyata.Hash256) sunyata.Hash256 {
-	buf := make([]byte, 32+32+32)
-	n := copy(buf[0:], minerAddr[:])
-	n += copy(buf[n:], txns[:])
-	n += copy(buf[n:], context[:])
-	return sunyata.HashBytes(buf)
-}
-
-// ValidationContext contains the necessary context to fully validate a block.
-type ValidationContext struct {
-	Index          sunyata.ChainIndex
-	State          StateAccumulator
-	TotalWork      sunyata.Work
-	Difficulty     sunyata.Work
-	LastAdjust     time.Time
-	PrevTimestamps [MedianTimestampWindow]time.Time
+// SigHash returns the hash that must be signed for each transaction input.
+func (vc *ValidationContext) SigHash(txn sunyata.Transaction) sunyata.Hash256 {
+	h := hasherPool.Get().(*sunyata.Hasher)
+	defer hasherPool.Put(h)
+	h.Reset()
+	for i := range txn.Inputs {
+		h.WriteHash(txn.Inputs[i].Parent.ID.TransactionID)
+		h.WriteUint64(txn.Inputs[i].Parent.ID.BeneficiaryIndex)
+	}
+	for i := range txn.Outputs {
+		h.WriteCurrency(txn.Outputs[i].Value)
+		h.WriteHash(txn.Outputs[i].Address)
+	}
+	h.WriteCurrency(txn.MinerFee)
+	return h.Sum()
 }
 
 func (vc *ValidationContext) numTimestamps() int {
@@ -129,62 +167,12 @@ func (vc *ValidationContext) validateHeader(h sunyata.BlockHeader) error {
 		return errors.New("wrong parent ID")
 	} else if sunyata.WorkRequiredForHash(h.ID()).Cmp(vc.Difficulty) < 0 {
 		return errors.New("insufficient work")
-	} else if time.Until(h.Timestamp) > maxFutureBlockTime {
+	} else if time.Until(h.Timestamp) > 2*time.Hour {
 		return ErrFutureBlock
 	} else if h.Timestamp.Before(vc.medianTimestamp()) {
 		return errors.New("timestamp is too far in the past")
 	}
 	return nil
-}
-
-// ValidateBlock validates b in the context of vc.
-func (vc *ValidationContext) ValidateBlock(b sunyata.Block) error {
-	h := b.Header
-	if err := vc.validateHeader(h); err != nil {
-		return err
-	} else if ComputeCommitment(h.MinerAddress, TransactionsHash(b.Transactions), vc.Hash()) != h.Commitment {
-		return errors.New("commitment hash does not match header")
-	} else if err := vc.ValidateTransactionSet(b.Transactions); err != nil {
-		return err
-	}
-	return nil
-}
-
-// Hash returns a hash of all of the data in a ValidationContext.
-func (vc *ValidationContext) Hash() sunyata.Hash256 {
-	h := hasherPool.Get().(*sunyata.Hasher)
-	defer hasherPool.Put(h)
-	h.Reset()
-
-	h.WriteUint64(vc.Index.Height)
-	h.WriteHash(vc.Index.ID)
-	h.WriteUint64(vc.State.NumLeaves)
-	for i, root := range vc.State.Trees {
-		if vc.State.HasTreeAtHeight(i) {
-			h.WriteHash(root)
-		}
-	}
-	h.WriteHash(vc.TotalWork.NumHashes)
-	h.WriteHash(vc.Difficulty.NumHashes)
-	h.WriteTime(vc.LastAdjust)
-	for _, ts := range vc.PrevTimestamps {
-		h.WriteTime(ts)
-	}
-	return h.Sum()
-}
-
-func (vc *ValidationContext) applyHeader(h sunyata.BlockHeader) {
-	blockWork := sunyata.WorkRequiredForHash(h.ID())
-	if h.Height > 0 && h.Height%sunyata.DifficultyAdjustmentInterval == 0 {
-		vc.Difficulty = sunyata.AdjustDifficulty(vc.Difficulty, h.Timestamp.Sub(vc.LastAdjust))
-		vc.LastAdjust = h.Timestamp
-	}
-	vc.TotalWork = vc.TotalWork.Add(blockWork)
-	if vc.numTimestamps() == len(vc.PrevTimestamps) {
-		copy(vc.PrevTimestamps[:], vc.PrevTimestamps[1:])
-	}
-	vc.PrevTimestamps[vc.numTimestamps()-1] = h.Timestamp
-	vc.Index = h.Index()
 }
 
 func (vc *ValidationContext) containsZeroValuedOutputs(txn sunyata.Transaction) bool {
@@ -249,7 +237,7 @@ func (vc *ValidationContext) validInputMerkleProofs(txn sunyata.Transaction) boo
 }
 
 func (vc *ValidationContext) validSignatures(txn sunyata.Transaction) bool {
-	sigHash := txn.SigHash()
+	sigHash := vc.SigHash(txn)
 	for _, in := range txn.Inputs {
 		if !ed25519.Verify(in.PublicKey[:], sigHash[:], in.Signature[:]) {
 			return false
@@ -320,7 +308,7 @@ func (vc *ValidationContext) noDoubleSpends(txns []sunyata.Transaction) error {
 
 // ValidateTransactionSet validates txns in their corresponding validation context.
 func (vc *ValidationContext) ValidateTransactionSet(txns []sunyata.Transaction) error {
-	if BlockWeight(txns) > MaxBlockWeight {
+	if vc.BlockWeight(txns) > vc.MaxBlockWeight() {
 		return ErrOverweight
 	}
 	if err := vc.validEphemeralOutputs(txns); err != nil {
@@ -333,6 +321,19 @@ func (vc *ValidationContext) ValidateTransactionSet(txns []sunyata.Transaction) 
 		if err := vc.ValidateTransaction(txn); err != nil {
 			return fmt.Errorf("transaction %v is invalid: %w", i, err)
 		}
+	}
+	return nil
+}
+
+// ValidateBlock validates b in the context of vc.
+func (vc *ValidationContext) ValidateBlock(b sunyata.Block) error {
+	h := b.Header
+	if err := vc.validateHeader(h); err != nil {
+		return err
+	} else if vc.Commitment(h.MinerAddress, b.Transactions) != h.Commitment {
+		return errors.New("commitment hash does not match header")
+	} else if err := vc.ValidateTransactionSet(b.Transactions); err != nil {
+		return err
 	}
 	return nil
 }

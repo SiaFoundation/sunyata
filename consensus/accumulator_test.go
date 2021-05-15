@@ -10,6 +10,10 @@ import (
 )
 
 func TestBlockRewardValue(t *testing.T) {
+	reward := func(height uint64) sunyata.Currency {
+		return (&ValidationContext{Index: sunyata.ChainIndex{Height: height - 1}}).BlockReward()
+	}
+
 	tests := []struct {
 		height uint64
 		exp    string
@@ -26,7 +30,7 @@ func TestBlockRewardValue(t *testing.T) {
 		{210e3 * 7, "0.391"},
 	}
 	for _, test := range tests {
-		got := BlockRewardValue(test.height)
+		got := reward(test.height)
 		if got.String() != test.exp {
 			t.Errorf("expected %v, got %v", test.exp, got)
 		}
@@ -34,10 +38,10 @@ func TestBlockRewardValue(t *testing.T) {
 	// test final reward
 	totalHalvings := bits.Len(50 * 1e9)
 	finalRewardHeight := uint64(210e3 * totalHalvings)
-	if BlockRewardValue(finalRewardHeight - 1).IsZero() {
+	if reward(finalRewardHeight - 1).IsZero() {
 		t.Errorf("final reward should be non-zero")
 	}
-	if !BlockRewardValue(finalRewardHeight).IsZero() {
+	if !reward(finalRewardHeight).IsZero() {
 		t.Errorf("reward after final reward height should be zero")
 	}
 }

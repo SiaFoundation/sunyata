@@ -118,23 +118,6 @@ type Transaction struct {
 	MinerFee Currency
 }
 
-// SigHash returns the hash that must be signed by the Inputs of txn.
-func (txn *Transaction) SigHash() Hash256 {
-	h := hasherPool.Get().(*Hasher)
-	defer hasherPool.Put(h)
-	h.Reset()
-	for i := range txn.Inputs {
-		h.WriteHash(txn.Inputs[i].Parent.ID.TransactionID)
-		h.WriteUint64(txn.Inputs[i].Parent.ID.BeneficiaryIndex)
-	}
-	for i := range txn.Outputs {
-		h.WriteCurrency(txn.Outputs[i].Value)
-		h.WriteHash(txn.Outputs[i].Address)
-	}
-	h.WriteCurrency(txn.MinerFee)
-	return h.Sum()
-}
-
 // ID returns the hash of all block-independent data in the transaction.
 func (txn *Transaction) ID() TransactionID {
 	h := hasherPool.Get().(*Hasher)

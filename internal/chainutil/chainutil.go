@@ -85,7 +85,7 @@ func (cs *ChainSim) MineBlockWithTxns(txns ...sunyata.Transaction) sunyata.Block
 			Nonce:        cs.nonce,
 			Timestamp:    prev.Timestamp.Add(time.Second),
 			MinerAddress: sunyata.VoidAddress,
-			Commitment:   consensus.ComputeCommitment(sunyata.VoidAddress, consensus.TransactionsHash(txns), cs.Context.Hash()),
+			Commitment:   cs.Context.Commitment(sunyata.VoidAddress, txns),
 		},
 		Transactions: txns,
 	}
@@ -144,7 +144,7 @@ func (cs *ChainSim) MineBlockWithBeneficiaries(bs ...sunyata.Beneficiary) sunyat
 	}
 
 	// sign and mine
-	sigHash := txn.SigHash()
+	sigHash := cs.Context.SigHash(txn)
 	for i := range txn.Inputs {
 		txn.Inputs[i].Signature = sunyata.SignTransaction(cs.privkey, sigHash)
 	}
@@ -166,7 +166,7 @@ func (cs *ChainSim) MineBlock() sunyata.Block {
 			},
 			MinerFee: sunyata.NewCurrency64(cs.Context.Index.Height),
 		}
-		sigHash := txn.SigHash()
+		sigHash := cs.Context.SigHash(txn)
 		for i := range txn.Inputs {
 			txn.Inputs[i].Signature = sunyata.SignTransaction(cs.privkey, sigHash)
 		}

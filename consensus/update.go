@@ -4,19 +4,6 @@ import (
 	"go.sia.tech/sunyata"
 )
 
-// BlockRewardTimelock is the number of blocks after which a block reward output
-// becomes spendable.
-const BlockRewardTimelock = 144
-
-// BlockRewardValue returns the reward mining the block at the specified chain
-// height.
-func BlockRewardValue(height uint64) sunyata.Currency {
-	// copy Bitcoin: start at 50, halve every 210,000 blocks
-	r := sunyata.BaseUnitsPerCoin.Mul64(50)
-	n := height / 210000
-	return sunyata.NewCurrency(r.Lo>>n|r.Hi<<(64-n), r.Hi>>n) // r >> n
-}
-
 // A StateApplyUpdate reflects the changes to consensus state resulting from the
 // application of a block.
 type StateApplyUpdate struct {
@@ -83,12 +70,26 @@ func (sau *StateApplyUpdate) UpdateOutputProof(o *sunyata.Output) {
 	o.MerkleProof = append(o.MerkleProof, sau.treeGrowth[len(o.MerkleProof)]...)
 }
 
+func applyHeader(vc ValidationContext, h sunyata.BlockHeader) ValidationContext {
+	blockWork := sunyata.WorkRequiredForHash(h.ID())
+	if h.Height > 0 && h.Height%sunyata.DifficultyAdjustmentInterval == 0 {
+		vc.Difficulty = sunyata.AdjustDifficulty(vc.Difficulty, h.Timestamp.Sub(vc.LastAdjust))
+		vc.LastAdjust = h.Timestamp
+	}
+	vc.TotalWork = vc.TotalWork.Add(blockWork)
+	if vc.numTimestamps() == len(vc.PrevTimestamps) {
+		copy(vc.PrevTimestamps[:], vc.PrevTimestamps[1:])
+	}
+	vc.PrevTimestamps[vc.numTimestamps()-1] = h.Timestamp
+	vc.Index = h.Index()
+	return vc
+}
+
 // ApplyBlock integrates a block into the current consensus state, producing
 // a StateApplyUpdate detailing the resulting changes. The block is assumed to
 // be fully validated.
 func ApplyBlock(vc ValidationContext, b sunyata.Block) (sau StateApplyUpdate) {
-	sau.Context = vc
-	sau.Context.applyHeader(b.Header)
+	sau.Context = applyHeader(vc, b.Header)
 
 	sau.spentOutputs = sau.Context.State.markInputsSpent(b.Transactions)
 
@@ -103,9 +104,9 @@ func ApplyBlock(vc ValidationContext, b sunyata.Block) (sau StateApplyUpdate) {
 			TransactionID:    sunyata.TransactionID(b.ID()),
 			BeneficiaryIndex: 0,
 		},
-		Value:    BlockRewardValue(b.Header.Height),
+		Value:    vc.BlockReward(),
 		Address:  b.Header.MinerAddress,
-		Timelock: b.Header.Height + BlockRewardTimelock,
+		Timelock: vc.BlockRewardTimelock(),
 	})
 
 	// locate ephemeral outputs

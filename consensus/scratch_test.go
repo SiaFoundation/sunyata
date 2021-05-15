@@ -72,8 +72,9 @@ func TestScratchChain(t *testing.T) {
 			PublicKey: pubkey,
 		})
 	}
+	sigHash := sau.Context.SigHash(txn)
 	for i := range txn.Inputs {
-		txn.Inputs[i].Signature = sunyata.SignTransaction(privkey, txn.SigHash())
+		txn.Inputs[i].Signature = sunyata.SignTransaction(privkey, sigHash)
 	}
 
 	b = sunyata.Block{
@@ -82,7 +83,7 @@ func TestScratchChain(t *testing.T) {
 			ParentID:     b.Header.ID(),
 			Timestamp:    b.Header.Timestamp.Add(time.Second),
 			MinerAddress: ourAddr,
-			Commitment:   ComputeCommitment(ourAddr, TransactionsHash([]sunyata.Transaction{txn}), sau.Context.Hash()),
+			Commitment:   sau.Context.Commitment(ourAddr, []sunyata.Transaction{txn}),
 		},
 		Transactions: []sunyata.Transaction{txn},
 	}
@@ -108,8 +109,9 @@ func TestScratchChain(t *testing.T) {
 		}},
 		MinerFee: sunyata.BaseUnitsPerCoin,
 	}
+	sigHash = sau.Context.SigHash(txn)
 	for i := range txn.Inputs {
-		txn.Inputs[i].Signature = sunyata.SignTransaction(privkey, txn.SigHash())
+		txn.Inputs[i].Signature = sunyata.SignTransaction(privkey, sigHash)
 	}
 
 	b = sunyata.Block{
@@ -118,7 +120,7 @@ func TestScratchChain(t *testing.T) {
 			ParentID:     bid,
 			Timestamp:    b.Header.Timestamp.Add(time.Second),
 			MinerAddress: ourAddr,
-			Commitment:   ComputeCommitment(ourAddr, TransactionsHash([]sunyata.Transaction{txn}), sau.Context.Hash()),
+			Commitment:   sau.Context.Commitment(ourAddr, []sunyata.Transaction{txn}),
 		},
 		Transactions: []sunyata.Transaction{txn},
 	}
@@ -166,8 +168,8 @@ func TestScratchChain(t *testing.T) {
 		}},
 		MinerFee: sunyata.BaseUnitsPerCoin,
 	}
-	parentTxn.Inputs[0].Signature = sunyata.SignTransaction(privkey, parentTxn.SigHash())
-	childTxn.Inputs[0].Signature = sunyata.SignTransaction(privkey, childTxn.SigHash())
+	parentTxn.Inputs[0].Signature = sunyata.SignTransaction(privkey, sau.Context.SigHash(parentTxn))
+	childTxn.Inputs[0].Signature = sunyata.SignTransaction(privkey, sau.Context.SigHash(childTxn))
 
 	b = sunyata.Block{
 		Header: sunyata.BlockHeader{
@@ -175,7 +177,7 @@ func TestScratchChain(t *testing.T) {
 			ParentID:     b.ID(),
 			Timestamp:    b.Header.Timestamp.Add(time.Second),
 			MinerAddress: ourAddr,
-			Commitment:   ComputeCommitment(ourAddr, TransactionsHash([]sunyata.Transaction{parentTxn, childTxn}), sau.Context.Hash()),
+			Commitment:   sau.Context.Commitment(ourAddr, []sunyata.Transaction{parentTxn, childTxn}),
 		},
 		Transactions: []sunyata.Transaction{parentTxn, childTxn},
 	}
@@ -206,7 +208,7 @@ func TestDifficultyAdjustment(t *testing.T) {
 			Height:     b.Header.Height + 1,
 			ParentID:   b.Header.ID(),
 			Timestamp:  b.Header.Timestamp.Add(time.Second),
-			Commitment: ComputeCommitment(sunyata.VoidAddress, TransactionsHash(nil), vc.Hash()),
+			Commitment: vc.Commitment(sunyata.VoidAddress, nil),
 		}
 		findBlockNonce(&b.Header, sunyata.HashRequiringWork(initialDifficulty))
 		if err := sc.AppendHeader(b.Header); err != nil {
@@ -228,7 +230,7 @@ func TestDifficultyAdjustment(t *testing.T) {
 		Height:     b.Header.Height + 1,
 		ParentID:   b.Header.ID(),
 		Timestamp:  b.Header.Timestamp.Add(time.Second),
-		Commitment: ComputeCommitment(sunyata.VoidAddress, TransactionsHash(nil), vc.Hash()),
+		Commitment: vc.Commitment(sunyata.VoidAddress, nil),
 	}
 	for sunyata.WorkRequiredForHash(b.ID()).Cmp(currentDifficulty) >= 0 {
 		findBlockNonce(&b.Header, sunyata.HashRequiringWork(initialDifficulty))

@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"go.sia.tech/sunyata"
+	"go.sia.tech/sunyata/consensus"
 )
 
 // A Seed generates ed25519 keys deterministically from some initial entropy.
@@ -72,10 +73,11 @@ func NewSeed() Seed {
 
 // A Store stores wallet state.
 type Store interface {
-	SpendableOutputs() []sunyata.Output
 	SeedIndex() uint64
+	Context() consensus.ValidationContext
 	AddAddress(addr sunyata.Address, index uint64) error
 	AddressIndex(addr sunyata.Address) (uint64, bool)
+	SpendableOutputs() []sunyata.Output
 	Transactions() []Transaction
 }
 
@@ -175,6 +177,19 @@ func (w *HotWallet) FundTransaction(txn *sunyata.Transaction, amount sunyata.Cur
 	return toSign, discard, nil
 }
 
+// SignableInputs returns the inputs of txn that the wallet can sign.
+func (w *HotWallet) SignableInputs(txn sunyata.Transaction) []sunyata.OutputID {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	var ids []sunyata.OutputID
+	for _, in := range txn.Inputs {
+		if _, ok := w.store.AddressIndex(in.Parent.Address); ok {
+			ids = append(ids, in.Parent.ID)
+		}
+	}
+	return ids
+}
+
 // SignTransaction adds signatures to each of the specified inputs.
 func (w *HotWallet) SignTransaction(txn *sunyata.Transaction, toSign []sunyata.OutputID) error {
 	w.mu.Lock()
@@ -187,6 +202,8 @@ func (w *HotWallet) SignTransaction(txn *sunyata.Transaction, toSign []sunyata.O
 		}
 		return nil
 	}
+	vc := w.store.Context()
+	sigHash := vc.SigHash(*txn)
 	for _, id := range toSign {
 		in := inputWithID(id)
 		if in == nil {
@@ -196,7 +213,6 @@ func (w *HotWallet) SignTransaction(txn *sunyata.Transaction, toSign []sunyata.O
 		if !ok {
 			return errors.New("no key for specified input")
 		}
-		sigHash := txn.SigHash()
 		in.Signature = sunyata.SignTransaction(w.seed.PrivateKey(index), sigHash)
 	}
 	return nil

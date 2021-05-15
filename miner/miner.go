@@ -46,19 +46,19 @@ func (m *Miner) MineBlock() sunyata.Block {
 		// TODO: if the miner and txpool don't have the same tip, we'll
 		// construct an invalid block
 		txns := m.tp.Transactions()
+
+		m.mu.Lock()
 		var weight uint64
 		for i := range txns {
-			weight += consensus.TransactionWeight(txns[i])
-			if weight > consensus.MaxBlockWeight {
+			weight += m.vc.TransactionWeight(txns[i])
+			if weight > m.vc.MaxBlockWeight() {
 				txns = txns[:i]
 				break
 			}
 		}
-
-		m.mu.Lock()
 		parent := m.vc.Index
 		target := sunyata.HashRequiringWork(m.vc.Difficulty)
-		commitment := consensus.ComputeCommitment(m.addr, consensus.TransactionsHash(txns), m.vc.Hash())
+		commitment := m.vc.Commitment(m.addr, txns)
 		m.mu.Unlock()
 		b := sunyata.Block{
 			Header: sunyata.BlockHeader{

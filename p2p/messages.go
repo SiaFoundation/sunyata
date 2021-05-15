@@ -538,7 +538,7 @@ func (m *msgValidationContext) encodedSize() int {
 	n += 32
 	n += 32
 	n += 8
-	n += consensus.MedianTimestampWindow * 8
+	n += len(m.PrevTimestamps) * 8
 	return n
 }
 

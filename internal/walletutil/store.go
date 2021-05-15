@@ -9,6 +9,7 @@ import (
 
 	"go.sia.tech/sunyata"
 	"go.sia.tech/sunyata/chain"
+	"go.sia.tech/sunyata/consensus"
 	"go.sia.tech/sunyata/wallet"
 )
 
@@ -18,7 +19,7 @@ type EphemeralStore struct {
 	addrs     map[sunyata.Address]uint64
 	outputs   []sunyata.Output
 	txns      []wallet.Transaction
-	tip       sunyata.ChainIndex
+	vc        consensus.ValidationContext
 	seedIndex uint64
 }
 
@@ -27,6 +28,13 @@ func (s *EphemeralStore) SeedIndex() uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.seedIndex
+}
+
+// Context implements Store.
+func (s *EphemeralStore) Context() consensus.ValidationContext {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.vc
 }
 
 // AddAddress implements Store.
@@ -54,7 +62,7 @@ func (s *EphemeralStore) SpendableOutputs() []sunyata.Output {
 	defer s.mu.Unlock()
 	var spendable []sunyata.Output
 	for _, o := range s.outputs {
-		if o.Timelock <= s.tip.Height {
+		if o.Timelock <= s.vc.Index.Height {
 			o.MerkleProof = append([]sunyata.Hash256(nil), o.MerkleProof...)
 			spendable = append(spendable, o)
 		}
@@ -122,7 +130,7 @@ func (s *EphemeralStore) ProcessChainApplyUpdate(cau *chain.ApplyUpdate, _ bool)
 		}
 	}
 
-	s.tip = cau.Context.Index
+	s.vc = cau.Context
 	return nil
 }
 
@@ -162,7 +170,7 @@ func (s *EphemeralStore) ProcessChainRevertUpdate(cru *chain.RevertUpdate) error
 		}
 	}
 
-	s.tip = cru.Context.Index
+	s.vc = cru.Context
 	return nil
 }
 
@@ -195,7 +203,7 @@ func (s *JSONStore) save() error {
 		addrs[hex.EncodeToString(k[:])] = v
 	}
 	js, _ := json.MarshalIndent(persistData{
-		Tip:          s.tip,
+		Tip:          s.vc.Index,
 		SeedIndex:    s.seedIndex,
 		Addrs:        addrs,
 		Outputs:      s.outputs,
@@ -221,17 +229,17 @@ func (s *JSONStore) save() error {
 	return nil
 }
 
-func (s *JSONStore) load(tip sunyata.ChainIndex) error {
+func (s *JSONStore) load(vc consensus.ValidationContext) (sunyata.ChainIndex, error) {
 	var p persistData
 	if js, err := os.ReadFile(filepath.Join(s.dir, "wallet.json")); os.IsNotExist(err) {
 		// set defaults
 		s.addrs = make(map[sunyata.Address]uint64)
-		s.tip = tip
-		return nil
+		s.vc = vc
+		return vc.Index, nil
 	} else if err != nil {
-		return err
+		return sunyata.ChainIndex{}, err
 	} else if err := json.Unmarshal(js, &p); err != nil {
-		return err
+		return sunyata.ChainIndex{}, err
 	}
 	s.addrs = make(map[sunyata.Address]uint64, len(p.Addrs))
 	for k, v := range p.Addrs {
@@ -241,9 +249,9 @@ func (s *JSONStore) load(tip sunyata.ChainIndex) error {
 	}
 	s.outputs = p.Outputs
 	s.txns = p.Transactions
-	s.tip = p.Tip
+	s.vc = vc
 	s.seedIndex = p.SeedIndex
-	return nil
+	return p.Tip, nil
 }
 
 // AddAddress implements Store.
@@ -267,13 +275,14 @@ func (s *JSONStore) ProcessChainRevertUpdate(cru *chain.RevertUpdate) error {
 }
 
 // NewJSONStore returns a new JSONStore.
-func NewJSONStore(dir string, tip sunyata.ChainIndex) (*JSONStore, sunyata.ChainIndex, error) {
+func NewJSONStore(dir string, vc consensus.ValidationContext) (*JSONStore, sunyata.ChainIndex, error) {
 	s := &JSONStore{
 		EphemeralStore: NewEphemeralStore(),
 		dir:            dir,
 	}
-	if err := s.load(tip); err != nil {
+	tip, err := s.load(vc)
+	if err != nil {
 		return nil, sunyata.ChainIndex{}, err
 	}
-	return s, s.tip, nil
+	return s, tip, nil
 }
