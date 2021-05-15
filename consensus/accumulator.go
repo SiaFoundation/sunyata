@@ -18,6 +18,9 @@ func mergeHeight(x, y uint64) int { return bits.Len64(x ^ y) }
 // clearBits clears the n least significant bits of x.
 func clearBits(x uint64, n int) uint64 { return x &^ (1<<n - 1) }
 
+// trailingOnes returns the number of trailing one bits in x.
+func trailingOnes(x uint64) int { return bits.TrailingZeros64(x + 1) }
+
 func merkleNodeHash(left, right sunyata.Hash256) sunyata.Hash256 {
 	buf := make([]byte, 65)
 	buf[0] = nodeHashPrefix
@@ -71,8 +74,6 @@ func (sa *StateAccumulator) HasTreeAtHeight(height int) bool {
 	return sa.NumLeaves&(1<<height) != 0
 }
 
-// containsOutput returns true if the supplied output is in the tree. The
-// output's proof must be up to date.
 func (sa *StateAccumulator) containsOutput(o *sunyata.Output, spent bool) bool {
 	root := outputProofRoot(o, spent)
 	start, end := bits.TrailingZeros64(sa.NumLeaves), bits.Len64(sa.NumLeaves)
@@ -92,7 +93,7 @@ func (sa *StateAccumulator) addNewOutputs(outputs []sunyata.Output, wasSpent fun
 	var treeGrowth [64][]sunyata.Hash256
 	for i := range outputs {
 		outputs[i].LeafIndex = sa.NumLeaves
-		outputs[i].MerkleProof = make([]sunyata.Hash256, 0, 32) // sufficient capacity for most purposes
+		outputs[i].MerkleProof = make([]sunyata.Hash256, 0, trailingOnes(sa.NumLeaves))
 
 		// Walk "up" the Forest, merging trees of the same height, but before
 		// merging two trees, append each of their roots to the proofs under the
@@ -137,8 +138,8 @@ func (sa *StateAccumulator) addNewOutputs(outputs []sunyata.Output, wasSpent fun
 				}
 			}
 			// Merge with the existing tree at this height. Since we're always
-			// adding leaves on the right-side of the tree, the existing root is
-			// always the left-hand sibling.
+			// adding leaves on the right-hand side of the tree, the existing
+			// root is always the left-hand sibling.
 			h = merkleNodeHash(oldRoot, h)
 		}
 	}
@@ -265,8 +266,8 @@ func (sa *StateAccumulator) markInputsSpent(txns []sunyata.Transaction) [64][]su
 
 		// Determine the range of leaf indices that comprise this tree. We can
 		// compute this efficiently by zeroing the least-significant bits of
-		// forest.NumLeaves. (Zeroing these bits is equivalent to subtracting
-		// the number of leaves in all trees smaller than this one.)
+		// NumLeaves. (Zeroing these bits is equivalent to subtracting the
+		// number of leaves in all trees smaller than this one.)
 		start := clearBits(sa.NumLeaves, height+1)
 		end := clearBits(sa.NumLeaves, height)
 
