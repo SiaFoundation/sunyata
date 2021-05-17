@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"math/bits"
 	"math/rand"
+	"reflect"
 	"testing"
 
 	"go.sia.tech/sunyata"
@@ -373,6 +374,74 @@ func TestMarkInputsSpent(t *testing.T) {
 			if acc2.Trees[i] != acc.Trees[i] {
 				t.Fatal("mismatch")
 			}
+		}
+	}
+}
+
+func TestMultiproof(t *testing.T) {
+	outputs := make([]sunyata.Output, 8)
+	leaves := make([]sunyata.Hash256, len(outputs))
+	for i := range outputs {
+		outputs[i].LeafIndex = uint64(i)
+		outputs[i].ID.BeneficiaryIndex = uint64(i)
+		leaves[i] = outputLeafHash(&outputs[i], false)
+	}
+	node01 := merkleNodeHash(leaves[0], leaves[1])
+	node23 := merkleNodeHash(leaves[2], leaves[3])
+	node45 := merkleNodeHash(leaves[4], leaves[5])
+	node67 := merkleNodeHash(leaves[6], leaves[7])
+	node03 := merkleNodeHash(node01, node23)
+	node47 := merkleNodeHash(node45, node67)
+	outputs[0].MerkleProof = []sunyata.Hash256{leaves[1], node23, node47}
+	outputs[1].MerkleProof = []sunyata.Hash256{leaves[0], node23, node47}
+	outputs[2].MerkleProof = []sunyata.Hash256{leaves[3], node01, node47}
+	outputs[3].MerkleProof = []sunyata.Hash256{leaves[2], node01, node47}
+	outputs[4].MerkleProof = []sunyata.Hash256{leaves[5], node67, node03}
+	outputs[5].MerkleProof = []sunyata.Hash256{leaves[4], node67, node03}
+	outputs[6].MerkleProof = []sunyata.Hash256{leaves[7], node45, node03}
+	outputs[7].MerkleProof = []sunyata.Hash256{leaves[6], node45, node03}
+
+	tests := []struct {
+		inputs []int
+		proof  []sunyata.Hash256
+	}{
+		{
+			inputs: []int{0},
+			proof:  []sunyata.Hash256{leaves[1], node23, node47},
+		},
+		{
+			inputs: []int{1, 2, 3},
+			proof:  []sunyata.Hash256{leaves[0], node47},
+		},
+		{
+			inputs: []int{7, 6, 0, 2, 3},
+			proof:  []sunyata.Hash256{leaves[1], node45},
+		},
+		{
+			inputs: []int{7, 6, 5, 4, 3, 2, 1, 0},
+			proof:  nil,
+		},
+	}
+	for _, test := range tests {
+		txns := []sunyata.Transaction{{Inputs: make([]sunyata.Input, len(test.inputs))}}
+		for i, j := range test.inputs {
+			txns[0].Inputs[i].Parent = outputs[j]
+		}
+
+		old := txns[0].DeepCopy()
+		// compute multiproof and erase individual proofs
+		proof := ComputeMultiproof(txns)
+		for _, txn := range txns {
+			for i := range txn.Inputs {
+				txn.Inputs[i].Parent.MerkleProof = make([]sunyata.Hash256, len(txn.Inputs[i].Parent.MerkleProof))
+			}
+		}
+		if !ExpandMultiproof(txns, proof) {
+			t.Error("invalid multiproof")
+		} else if !reflect.DeepEqual(txns[0], old) {
+			t.Fatal(txns, old)
+		} else if !reflect.DeepEqual(proof, test.proof) {
+			t.Error("wrong proof generated")
 		}
 	}
 }

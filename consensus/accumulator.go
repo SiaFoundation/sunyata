@@ -276,3 +276,125 @@ func (sa *StateAccumulator) markInputsSpent(txns []sunyata.Transaction) [64][]su
 	}
 	return groups
 }
+
+// ComputeMultiproof computes a single Merkle proof for all inputs in txns.
+func ComputeMultiproof(txns []sunyata.Transaction) (proof []sunyata.Hash256) {
+	splitOutputs := func(outputs []*sunyata.Output, mid uint64) (left, right []*sunyata.Output) {
+		split := sort.Search(len(outputs), func(i int) bool { return outputs[i].LeafIndex >= mid })
+		return outputs[:split], outputs[split:]
+	}
+
+	var visit func(i, j uint64, outputs []*sunyata.Output)
+	visit = func(i, j uint64, outputs []*sunyata.Output) {
+		height := bits.TrailingZeros64(j - i)
+		if height == 0 {
+			return // fully consumed
+		}
+
+		mid := (i + j) / 2
+		left, right := splitOutputs(outputs, mid)
+		if len(left) == 0 {
+			proof = append(proof, right[0].MerkleProof[height-1])
+		} else {
+			visit(i, mid, left)
+		}
+		if len(right) == 0 {
+			proof = append(proof, left[0].MerkleProof[height-1])
+		} else {
+			visit(mid, j, right)
+		}
+	}
+
+	var trees [64][]*sunyata.Output
+	for _, txn := range txns {
+		for i, in := range txn.Inputs {
+			if in.Parent.LeafIndex != sunyata.EphemeralLeafIndex {
+				trees[len(in.Parent.MerkleProof)] = append(trees[len(in.Parent.MerkleProof)], &txn.Inputs[i].Parent)
+			}
+		}
+	}
+	for height, outputs := range trees {
+		if len(outputs) == 0 {
+			continue
+		}
+		sort.Slice(outputs, func(i, j int) bool {
+			return outputs[i].LeafIndex < outputs[j].LeafIndex
+		})
+		start := clearBits(outputs[0].LeafIndex, height+1)
+		end := start + 1<<height
+		visit(start, end, outputs)
+	}
+	return
+}
+
+// ExpandMultiproof restores all of the input proofs in txns using the supplied
+// multiproof. The len of each input proof must be the correct size.
+func ExpandMultiproof(txns []sunyata.Transaction, proof []sunyata.Hash256) bool {
+	splitOutputs := func(outputs []*sunyata.Output, mid uint64) (left, right []*sunyata.Output) {
+		split := sort.Search(len(outputs), func(i int) bool { return outputs[i].LeafIndex >= mid })
+		return outputs[:split], outputs[split:]
+	}
+
+	var expand func(i, j uint64, outputs []*sunyata.Output) sunyata.Hash256
+	expand = func(i, j uint64, outputs []*sunyata.Output) sunyata.Hash256 {
+		height := bits.TrailingZeros64(j - i)
+		if len(outputs) == 0 {
+			// no outputs in this subtree; must have a proof root
+			h := proof[0]
+			proof = proof[1:]
+			return h
+		} else if len(outputs) == 1 && height == 0 {
+			return outputLeafHash(outputs[0], false)
+		}
+		mid := (i + j) / 2
+		left, right := splitOutputs(outputs, mid)
+		leftRoot := expand(i, mid, left)
+		rightRoot := expand(mid, j, right)
+		for i := range right {
+			right[i].MerkleProof[height-1] = leftRoot
+		}
+		for i := range left {
+			left[i].MerkleProof[height-1] = rightRoot
+		}
+		return merkleNodeHash(leftRoot, rightRoot)
+	}
+
+	// helper for computing valid proof size
+	var proofSize func(i, j uint64, outputs []*sunyata.Output) int
+	proofSize = func(i, j uint64, outputs []*sunyata.Output) int {
+		height := bits.TrailingZeros64(j - i)
+		if len(outputs) == 0 {
+			return 1
+		} else if height == 0 {
+			return 0
+		}
+		mid := (i + j) / 2
+		left, right := splitOutputs(outputs, mid)
+		return proofSize(i, mid, left) + proofSize(mid, j, right)
+	}
+
+	var trees [64][]*sunyata.Output
+	for _, txn := range txns {
+		for i, in := range txn.Inputs {
+			if in.Parent.LeafIndex != sunyata.EphemeralLeafIndex {
+				trees[len(in.Parent.MerkleProof)] = append(trees[len(in.Parent.MerkleProof)], &txn.Inputs[i].Parent)
+			}
+		}
+	}
+	for height, outputs := range trees {
+		if len(outputs) == 0 {
+			continue
+		}
+		sort.Slice(outputs, func(i, j int) bool {
+			return outputs[i].LeafIndex < outputs[j].LeafIndex
+		})
+		start := clearBits(outputs[0].LeafIndex, height+1)
+		end := start + 1<<height
+		if len(proof) < proofSize(start, end, outputs) {
+			return false
+		}
+		expand(start, end, outputs)
+	}
+
+	return len(proof) == 0
+}
