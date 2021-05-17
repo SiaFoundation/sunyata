@@ -3,6 +3,7 @@ package p2p
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -277,8 +278,9 @@ func (m *MsgTransactions) encodedSize() int {
 	for i := range m.Blocks {
 		size += 4
 		for j := range m.Blocks[i] {
-			size += (*msgTransaction)(&m.Blocks[i][j]).encodedSize()
+			size += (*msgTransactionNoProofs)(&m.Blocks[i][j]).encodedSize()
 		}
+		size += 4 + len(consensus.ComputeMultiproof(m.Blocks[i]))*32
 	}
 	return size
 }
@@ -289,7 +291,12 @@ func (m *MsgTransactions) encodeTo(b *msgBuffer) {
 	for i := range m.Blocks {
 		b.writePrefix(len(m.Blocks[i]))
 		for j := range m.Blocks[i] {
-			(*msgTransaction)(&m.Blocks[i][j]).encodeTo(b)
+			(*msgTransactionNoProofs)(&m.Blocks[i][j]).encodeTo(b)
+		}
+		proof := consensus.ComputeMultiproof(m.Blocks[i])
+		b.writePrefix(len(proof))
+		for j := range proof {
+			b.writeHash(proof[j])
 		}
 	}
 }
@@ -300,7 +307,14 @@ func (m *MsgTransactions) decodeFrom(b *msgBuffer) {
 	for i := range m.Blocks {
 		m.Blocks[i] = make([]sunyata.Transaction, b.readPrefix(minTxnSize))
 		for j := range m.Blocks[i] {
-			(*msgTransaction)(&m.Blocks[i][j]).decodeFrom(b)
+			(*msgTransactionNoProofs)(&m.Blocks[i][j]).decodeFrom(b)
+		}
+		proof := make([]sunyata.Hash256, b.readPrefix(32))
+		for i := range proof {
+			proof[i] = b.readHash()
+		}
+		if b.err == nil && !consensus.ExpandMultiproof(m.Blocks[i], proof) {
+			b.err = errors.New("invalid multiproof")
 		}
 	}
 }
@@ -521,6 +535,62 @@ func (m *msgTransaction) decodeFrom(b *msgBuffer) {
 		for i := range in.Parent.MerkleProof {
 			in.Parent.MerkleProof[i] = b.readHash()
 		}
+		in.Parent.LeafIndex = b.readUint64()
+		b.read(in.PublicKey[:])
+		b.read(in.Signature[:])
+	}
+	m.Outputs = make([]sunyata.Beneficiary, b.readPrefix(48))
+	for j := range m.Outputs {
+		out := &m.Outputs[j]
+		out.Value = b.readCurrency()
+		out.Address = b.readHash()
+	}
+	m.MinerFee = b.readCurrency()
+}
+
+type msgTransactionNoProofs sunyata.Transaction
+
+func (m *msgTransactionNoProofs) encodedSize() int {
+	size := 4 + len(m.Inputs)*(32+8+16+32+8+4+8+32+64) // inputs
+	size += 4 + len(m.Outputs)*(16+32)                 // outputs
+	size += 16                                         // miner fee
+	return size
+}
+
+func (m *msgTransactionNoProofs) encodeTo(b *msgBuffer) {
+	b.writePrefix(len(m.Inputs))
+	for i := range m.Inputs {
+		in := &m.Inputs[i]
+		b.writeHash(in.Parent.ID.TransactionID)
+		b.writeUint64(in.Parent.ID.BeneficiaryIndex)
+		b.writeCurrency(in.Parent.Value)
+		b.writeHash(in.Parent.Address)
+		b.writeUint64(in.Parent.Timelock)
+		b.writePrefix(len(in.Parent.MerkleProof))
+		b.writeUint64(in.Parent.LeafIndex)
+		b.write(in.PublicKey[:])
+		b.write(in.Signature[:])
+	}
+	b.writePrefix(len(m.Outputs))
+	for j := range m.Outputs {
+		out := &m.Outputs[j]
+		b.writeCurrency(out.Value)
+		b.writeHash(out.Address)
+	}
+	b.writeCurrency(m.MinerFee)
+}
+
+func (m *msgTransactionNoProofs) decodeFrom(b *msgBuffer) {
+	const minInputSize = 32 + 8 + 16 + 32 + 8 + 4 + 8 + 32 + 64
+	m.Inputs = make([]sunyata.Input, b.readPrefix(minInputSize))
+	for j := range m.Inputs {
+		in := &m.Inputs[j]
+		in.Parent.ID.TransactionID = b.readHash()
+		in.Parent.ID.BeneficiaryIndex = b.readUint64()
+		in.Parent.Value = b.readCurrency()
+		in.Parent.Address = b.readHash()
+		in.Parent.Timelock = b.readUint64()
+		in.Parent.MerkleProof = make([]sunyata.Hash256, b.readPrefix(32))
 		in.Parent.LeafIndex = b.readUint64()
 		b.read(in.PublicKey[:])
 		b.read(in.Signature[:])

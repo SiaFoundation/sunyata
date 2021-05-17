@@ -469,7 +469,7 @@ func writeCheckpoint(w io.Writer, c consensus.Checkpoint) error {
 	writeHash(h.MinerAddress)
 	writeHash(h.Commitment)
 
-	// write txns
+	// write txns + multiproofs
 	writeInt(len(c.Block.Transactions))
 	for _, txn := range c.Block.Transactions {
 		writeInt(len(txn.Inputs))
@@ -481,9 +481,6 @@ func writeCheckpoint(w io.Writer, c consensus.Checkpoint) error {
 			writeHash(in.Parent.Address)
 			writeUint64(in.Parent.Timelock)
 			writeInt(len(in.Parent.MerkleProof))
-			for _, p := range in.Parent.MerkleProof {
-				writeHash(p)
-			}
 			writeUint64(in.Parent.LeafIndex)
 			writeHash(in.PublicKey)
 			write(in.Signature[:])
@@ -495,6 +492,11 @@ func writeCheckpoint(w io.Writer, c consensus.Checkpoint) error {
 			writeHash(out.Address)
 		}
 		writeCurrency(txn.MinerFee)
+	}
+	proof := consensus.ComputeMultiproof(c.Block.Transactions)
+	writeInt(len(proof))
+	for _, p := range proof {
+		writeHash(p)
 	}
 
 	// write context
@@ -554,7 +556,7 @@ func readCheckpoint(r io.Reader, c *consensus.Checkpoint) error {
 	h.MinerAddress = readHash()
 	h.Commitment = readHash()
 
-	// read txns
+	// read txns + multiproof
 	c.Block.Transactions = make([]sunyata.Transaction, readUint64())
 	for i := range c.Block.Transactions {
 		txn := &c.Block.Transactions[i]
@@ -567,9 +569,6 @@ func readCheckpoint(r io.Reader, c *consensus.Checkpoint) error {
 			in.Parent.Address = readHash()
 			in.Parent.Timelock = readUint64()
 			in.Parent.MerkleProof = make([]sunyata.Hash256, readUint64())
-			for i := range in.Parent.MerkleProof {
-				in.Parent.MerkleProof[i] = readHash()
-			}
 			in.Parent.LeafIndex = readUint64()
 			in.PublicKey = readHash()
 			read(in.Signature[:])
@@ -581,6 +580,13 @@ func readCheckpoint(r io.Reader, c *consensus.Checkpoint) error {
 			out.Address = readHash()
 		}
 		txn.MinerFee = readCurrency()
+	}
+	proof := make([]sunyata.Hash256, readUint64())
+	for i := range proof {
+		proof[i] = readHash()
+	}
+	if !consensus.ExpandMultiproof(c.Block.Transactions, proof) {
+		err = errors.New("invalid multiproof")
 	}
 
 	// read context
