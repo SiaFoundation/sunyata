@@ -110,6 +110,15 @@ func (b *msgBuffer) read(p []byte) {
 	_, b.err = io.ReadFull(&b.buf, p)
 }
 
+func (b *msgBuffer) writeHash(p [32]byte) {
+	b.buf.Write(p[:])
+}
+
+func (b *msgBuffer) readHash() (p [32]byte) {
+	b.read(p[:])
+	return
+}
+
 func (b *msgBuffer) writeBool(p bool) {
 	if p {
 		b.buf.WriteByte(1)
@@ -318,7 +327,7 @@ func (m *MsgRelayBlock) encodeTo(b *msgBuffer) {
 	(*msgBlockHeader)(&m.Header).encodeTo(b)
 	b.writePrefix(len(m.TransactionIDs))
 	for i := range m.TransactionIDs {
-		b.write(m.TransactionIDs[i][:])
+		b.writeHash(m.TransactionIDs[i])
 	}
 	b.writePrefix(len(m.Transactions))
 	for i := range m.Transactions {
@@ -330,7 +339,7 @@ func (m *MsgRelayBlock) decodeFrom(b *msgBuffer) {
 	(*msgBlockHeader)(&m.Header).decodeFrom(b)
 	m.TransactionIDs = make([]sunyata.TransactionID, b.readPrefix(32))
 	for i := range m.TransactionIDs {
-		b.read(m.TransactionIDs[i][:])
+		m.TransactionIDs[i] = b.readHash()
 	}
 	m.Transactions = make([]sunyata.Transaction, b.readPrefix(minTxnSize))
 	for i := range m.Transactions {
@@ -425,12 +434,12 @@ const msgChainIndexSize = 8 + 32
 
 func (m *msgChainIndex) encodeTo(b *msgBuffer) {
 	b.writeUint64(m.Height)
-	b.write(m.ID[:])
+	b.writeHash(m.ID)
 }
 
 func (m *msgChainIndex) decodeFrom(b *msgBuffer) {
 	m.Height = b.readUint64()
-	b.read(m.ID[:])
+	m.ID = b.readHash()
 }
 
 type msgBlockHeader sunyata.BlockHeader
@@ -439,20 +448,20 @@ const msgBlockHeaderSize = 8 + 32 + 8 + 8 + 32 + 32
 
 func (m *msgBlockHeader) encodeTo(b *msgBuffer) {
 	b.writeUint64(m.Height)
-	b.write(m.ParentID[:])
+	b.writeHash(m.ParentID)
 	b.write(m.Nonce[:])
 	b.writeUint64(uint64(m.Timestamp.Unix()))
-	b.write(m.MinerAddress[:])
-	b.write(m.Commitment[:])
+	b.writeHash(m.MinerAddress)
+	b.writeHash(m.Commitment)
 }
 
 func (m *msgBlockHeader) decodeFrom(b *msgBuffer) {
 	m.Height = b.readUint64()
-	b.read(m.ParentID[:])
+	m.ParentID = b.readHash()
 	b.read(m.Nonce[:])
 	m.Timestamp = time.Unix(int64(b.readUint64()), 0)
-	b.read(m.MinerAddress[:])
-	b.read(m.Commitment[:])
+	m.MinerAddress = b.readHash()
+	m.Commitment = b.readHash()
 }
 
 type msgTransaction sunyata.Transaction
@@ -476,14 +485,14 @@ func (m *msgTransaction) encodeTo(b *msgBuffer) {
 	b.writePrefix(len(m.Inputs))
 	for i := range m.Inputs {
 		in := &m.Inputs[i]
-		b.write(in.Parent.ID.TransactionID[:])
+		b.writeHash(in.Parent.ID.TransactionID)
 		b.writeUint64(in.Parent.ID.BeneficiaryIndex)
 		b.writeCurrency(in.Parent.Value)
-		b.write(in.Parent.Address[:])
+		b.writeHash(in.Parent.Address)
 		b.writeUint64(in.Parent.Timelock)
 		b.writePrefix(len(in.Parent.MerkleProof))
 		for k := range in.Parent.MerkleProof {
-			b.write(in.Parent.MerkleProof[k][:])
+			b.writeHash(in.Parent.MerkleProof[k])
 		}
 		b.writeUint64(in.Parent.LeafIndex)
 		b.write(in.PublicKey[:])
@@ -493,7 +502,7 @@ func (m *msgTransaction) encodeTo(b *msgBuffer) {
 	for j := range m.Outputs {
 		out := &m.Outputs[j]
 		b.writeCurrency(out.Value)
-		b.write(out.Address[:])
+		b.writeHash(out.Address)
 	}
 	b.writeCurrency(m.MinerFee)
 }
@@ -503,14 +512,14 @@ func (m *msgTransaction) decodeFrom(b *msgBuffer) {
 	m.Inputs = make([]sunyata.Input, b.readPrefix(minInputSize))
 	for j := range m.Inputs {
 		in := &m.Inputs[j]
-		b.read(in.Parent.ID.TransactionID[:])
+		in.Parent.ID.TransactionID = b.readHash()
 		in.Parent.ID.BeneficiaryIndex = b.readUint64()
 		in.Parent.Value = b.readCurrency()
-		b.read(in.Parent.Address[:])
+		in.Parent.Address = b.readHash()
 		in.Parent.Timelock = b.readUint64()
 		in.Parent.MerkleProof = make([]sunyata.Hash256, b.readPrefix(32))
 		for i := range in.Parent.MerkleProof {
-			b.read(in.Parent.MerkleProof[i][:])
+			in.Parent.MerkleProof[i] = b.readHash()
 		}
 		in.Parent.LeafIndex = b.readUint64()
 		b.read(in.PublicKey[:])
@@ -520,7 +529,7 @@ func (m *msgTransaction) decodeFrom(b *msgBuffer) {
 	for j := range m.Outputs {
 		out := &m.Outputs[j]
 		out.Value = b.readCurrency()
-		b.read(out.Address[:])
+		out.Address = b.readHash()
 	}
 	m.MinerFee = b.readCurrency()
 }
@@ -547,11 +556,11 @@ func (m *msgValidationContext) encodeTo(b *msgBuffer) {
 	b.writeUint64(m.State.NumLeaves)
 	for i := range m.State.Trees {
 		if m.State.HasTreeAtHeight(i) {
-			b.write(m.State.Trees[i][:])
+			b.writeHash(m.State.Trees[i])
 		}
 	}
-	b.write(m.TotalWork.NumHashes[:])
-	b.write(m.Difficulty.NumHashes[:])
+	b.writeHash(m.TotalWork.NumHashes)
+	b.writeHash(m.Difficulty.NumHashes)
 	b.writeUint64(uint64(m.LastAdjust.Unix()))
 	for i := range m.PrevTimestamps {
 		b.writeUint64(uint64(m.PrevTimestamps[i].Unix()))
@@ -563,11 +572,11 @@ func (m *msgValidationContext) decodeFrom(b *msgBuffer) {
 	m.State.NumLeaves = b.readUint64()
 	for i := range m.State.Trees {
 		if m.State.HasTreeAtHeight(i) {
-			b.read(m.State.Trees[i][:])
+			m.State.Trees[i] = b.readHash()
 		}
 	}
-	b.read(m.TotalWork.NumHashes[:])
-	b.read(m.Difficulty.NumHashes[:])
+	m.TotalWork.NumHashes = b.readHash()
+	m.Difficulty.NumHashes = b.readHash()
 	m.LastAdjust = time.Unix(int64(b.readUint64()), 0)
 	for i := range m.PrevTimestamps {
 		m.PrevTimestamps[i] = time.Unix(int64(b.readUint64()), 0)
