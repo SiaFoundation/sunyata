@@ -29,20 +29,14 @@ func (sc *ScratchChain) AppendHeader(h sunyata.BlockHeader) error {
 	return nil
 }
 
-// ApplyBlockTransactions fills in the transactions of the next empty entry in
-// the chain. The block's validated header must already exist in the chain.
-func (sc *ScratchChain) ApplyBlockTransactions(txns []sunyata.Transaction) (Checkpoint, error) {
+// ApplyBlock applies b to the chain. The block's validated header must already
+// exist in the chain.
+func (sc *ScratchChain) ApplyBlock(b sunyata.Block) (Checkpoint, error) {
 	if sc.tvc.Index.Height+1 > sc.hvc.Index.Height {
 		return Checkpoint{}, errors.New("more blocks than headers")
-	}
-	b := sunyata.Block{
-		Header:       sc.headers[sc.tvc.Index.Height-sc.Base().Height],
-		Transactions: txns,
-	}
-	if err := sc.tvc.ValidateBlock(b); err != nil {
+	} else if err := sc.tvc.ValidateBlock(b); err != nil {
 		return Checkpoint{}, err
 	}
-
 	sc.tvc = ApplyBlock(sc.tvc, b).Context
 	return Checkpoint{
 		Block:   b,

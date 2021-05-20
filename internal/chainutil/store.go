@@ -469,7 +469,7 @@ func writeCheckpoint(w io.Writer, c consensus.Checkpoint) error {
 	writeHash(h.MinerAddress)
 	writeHash(h.Commitment)
 
-	// write txns + multiproofs
+	// write txns
 	writeInt(len(c.Block.Transactions))
 	for _, txn := range c.Block.Transactions {
 		writeInt(len(txn.Inputs))
@@ -493,9 +493,10 @@ func writeCheckpoint(w io.Writer, c consensus.Checkpoint) error {
 		}
 		writeCurrency(txn.MinerFee)
 	}
-	proof := consensus.ComputeMultiproof(c.Block.Transactions)
-	writeInt(len(proof))
-	for _, p := range proof {
+
+	// write accumulator proof
+	writeInt(len(c.Block.AccumulatorProof))
+	for _, p := range c.Block.AccumulatorProof {
 		writeHash(p)
 	}
 
@@ -556,7 +557,7 @@ func readCheckpoint(r io.Reader, c *consensus.Checkpoint) error {
 	h.MinerAddress = readHash()
 	h.Commitment = readHash()
 
-	// read txns + multiproof
+	// read txns
 	c.Block.Transactions = make([]sunyata.Transaction, readUint64())
 	for i := range c.Block.Transactions {
 		txn := &c.Block.Transactions[i]
@@ -581,11 +582,13 @@ func readCheckpoint(r io.Reader, c *consensus.Checkpoint) error {
 		}
 		txn.MinerFee = readCurrency()
 	}
-	proof := make([]sunyata.Hash256, readUint64())
-	for i := range proof {
-		proof[i] = readHash()
+
+	// read accumulator proof
+	c.Block.AccumulatorProof = make([]sunyata.Hash256, readUint64())
+	for i := range c.Block.AccumulatorProof {
+		c.Block.AccumulatorProof[i] = readHash()
 	}
-	if !consensus.ExpandMultiproof(c.Block.Transactions, proof) {
+	if !consensus.ExpandMultiproof(c.Block.Transactions, c.Block.AccumulatorProof) {
 		err = errors.New("invalid multiproof")
 	}
 

@@ -73,19 +73,13 @@ func (tn *testNode) stopMining() bool  { return atomic.CompareAndSwapInt32(&tn.m
 func (tn *testNode) mineBlock() error {
 again:
 	b := tn.m.MineBlock()
-
 	err := tn.c.AddTipBlock(b)
 	if errors.Is(err, chain.ErrUnknownIndex) {
 		goto again
 	} else if err != nil {
 		return err
 	}
-
-	// broadcast it
-	tn.s.Broadcast(&MsgRelayBlock{
-		Header:       b.Header,
-		Transactions: b.Transactions,
-	})
+	tn.s.Broadcast(&MsgRelayBlock{Block: b})
 	return nil
 }
 

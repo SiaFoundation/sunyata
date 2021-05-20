@@ -77,18 +77,23 @@ func TestScratchChain(t *testing.T) {
 		txn.Inputs[i].Signature = sunyata.SignTransaction(privkey, sigHash)
 	}
 
-	b = sunyata.Block{
-		Header: sunyata.BlockHeader{
-			Height:       b.Header.Height + 1,
-			ParentID:     b.Header.ID(),
-			Timestamp:    b.Header.Timestamp.Add(time.Second),
-			MinerAddress: ourAddr,
-			Commitment:   sau.Context.Commitment(ourAddr, []sunyata.Transaction{txn}),
-		},
-		Transactions: []sunyata.Transaction{txn},
+	mineBlock := func(txns ...sunyata.Transaction) sunyata.Block {
+		b := sunyata.Block{
+			Header: sunyata.BlockHeader{
+				Height:       b.Header.Height + 1,
+				ParentID:     b.Header.ID(),
+				Timestamp:    b.Header.Timestamp.Add(time.Second),
+				MinerAddress: ourAddr,
+			},
+			Transactions:     txns,
+			AccumulatorProof: ComputeMultiproof(txns),
+		}
+		b.Header.Commitment = sau.Context.Commitment(b.Header.MinerAddress, b.Transactions, b.AccumulatorProof)
+		findBlockNonce(&b.Header, sunyata.HashRequiringWork(sau.Context.Difficulty))
+		return b
 	}
-	findBlockNonce(&b.Header, sunyata.HashRequiringWork(initialDifficulty))
-	bid := b.ID()
+
+	b = mineBlock(txn)
 	if err := sc.AppendHeader(b.Header); err != nil {
 		t.Fatal(err)
 	}
@@ -114,18 +119,7 @@ func TestScratchChain(t *testing.T) {
 		txn.Inputs[i].Signature = sunyata.SignTransaction(privkey, sigHash)
 	}
 
-	b = sunyata.Block{
-		Header: sunyata.BlockHeader{
-			Height:       b.Header.Height + 1,
-			ParentID:     bid,
-			Timestamp:    b.Header.Timestamp.Add(time.Second),
-			MinerAddress: ourAddr,
-			Commitment:   sau.Context.Commitment(ourAddr, []sunyata.Transaction{txn}),
-		},
-		Transactions: []sunyata.Transaction{txn},
-	}
-	findBlockNonce(&b.Header, sunyata.HashRequiringWork(initialDifficulty))
-	bid = b.ID()
+	b = mineBlock(txn)
 	if err := sc.AppendHeader(b.Header); err != nil {
 		t.Fatal(err)
 	}
@@ -171,17 +165,7 @@ func TestScratchChain(t *testing.T) {
 	parentTxn.Inputs[0].Signature = sunyata.SignTransaction(privkey, sau.Context.SigHash(parentTxn))
 	childTxn.Inputs[0].Signature = sunyata.SignTransaction(privkey, sau.Context.SigHash(childTxn))
 
-	b = sunyata.Block{
-		Header: sunyata.BlockHeader{
-			Height:       b.Header.Height + 1,
-			ParentID:     b.ID(),
-			Timestamp:    b.Header.Timestamp.Add(time.Second),
-			MinerAddress: ourAddr,
-			Commitment:   sau.Context.Commitment(ourAddr, []sunyata.Transaction{parentTxn, childTxn}),
-		},
-		Transactions: []sunyata.Transaction{parentTxn, childTxn},
-	}
-	findBlockNonce(&b.Header, sunyata.HashRequiringWork(initialDifficulty))
+	b = mineBlock(parentTxn, childTxn)
 	if err := sc.AppendHeader(b.Header); err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +173,7 @@ func TestScratchChain(t *testing.T) {
 
 	// validate all blocks
 	for _, b := range blocks {
-		if _, err := sc.ApplyBlockTransactions(b.Transactions); err != nil {
+		if _, err := sc.ApplyBlock(b); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -205,15 +189,16 @@ func TestDifficultyAdjustment(t *testing.T) {
 	sc := NewScratchChain(vc)
 	for i := 0; i < sunyata.DifficultyAdjustmentInterval; i++ {
 		b.Header = sunyata.BlockHeader{
-			Height:     b.Header.Height + 1,
-			ParentID:   b.Header.ID(),
-			Timestamp:  b.Header.Timestamp.Add(time.Second),
-			Commitment: vc.Commitment(sunyata.VoidAddress, nil),
+			Height:    b.Header.Height + 1,
+			ParentID:  b.Header.ID(),
+			Timestamp: b.Header.Timestamp.Add(time.Second),
 		}
-		findBlockNonce(&b.Header, sunyata.HashRequiringWork(initialDifficulty))
+		b.AccumulatorProof = ComputeMultiproof(b.Transactions)
+		b.Header.Commitment = vc.Commitment(sunyata.VoidAddress, b.Transactions, b.AccumulatorProof)
+		findBlockNonce(&b.Header, sunyata.HashRequiringWork(vc.Difficulty))
 		if err := sc.AppendHeader(b.Header); err != nil {
 			t.Fatal(err)
-		} else if _, err := sc.ApplyBlockTransactions(nil); err != nil {
+		} else if _, err := sc.ApplyBlock(b); err != nil {
 			t.Fatal(err)
 		}
 		vc = ApplyBlock(vc, b).Context
@@ -227,13 +212,13 @@ func TestDifficultyAdjustment(t *testing.T) {
 
 	// mine a block with less than the minimum work; it should be rejected
 	b.Header = sunyata.BlockHeader{
-		Height:     b.Header.Height + 1,
-		ParentID:   b.Header.ID(),
-		Timestamp:  b.Header.Timestamp.Add(time.Second),
-		Commitment: vc.Commitment(sunyata.VoidAddress, nil),
+		Height:    b.Header.Height + 1,
+		ParentID:  b.Header.ID(),
+		Timestamp: b.Header.Timestamp.Add(time.Second),
 	}
+	b.Header.Commitment = vc.Commitment(sunyata.VoidAddress, b.Transactions, b.AccumulatorProof)
 	for sunyata.WorkRequiredForHash(b.ID()).Cmp(currentDifficulty) >= 0 {
-		findBlockNonce(&b.Header, sunyata.HashRequiringWork(initialDifficulty))
+		findBlockNonce(&b.Header, sunyata.HashRequiringWork(vc.Difficulty))
 	}
 	if err := sc.AppendHeader(b.Header); err == nil {
 		t.Fatal("expected block to be rejected")
@@ -244,7 +229,7 @@ func TestDifficultyAdjustment(t *testing.T) {
 	findBlockNonce(&b.Header, sunyata.HashRequiringWork(currentDifficulty))
 	if err := sc.AppendHeader(b.Header); err != nil {
 		t.Fatal(err)
-	} else if _, err := sc.ApplyBlockTransactions(nil); err != nil {
+	} else if _, err := sc.ApplyBlock(b); err != nil {
 		t.Fatal(err)
 	}
 	vc = ApplyBlock(vc, b).Context

@@ -75,7 +75,7 @@ func TestManager(t *testing.T) {
 	hs.applyHistory = nil
 	if _, err := cm.AddHeaders(chainutil.JustHeaders(betterChain)); err != nil {
 		t.Fatal(err)
-	} else if _, err := cm.AddTransactions(betterChain[0].Index(), chainutil.JustTransactions(betterChain)); err != nil {
+	} else if _, err := cm.AddBlocks(betterChain); err != nil {
 		t.Fatal(err)
 	}
 

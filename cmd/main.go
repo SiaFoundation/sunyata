@@ -404,10 +404,7 @@ func (d *node) mine() {
 		}
 
 		// broadcast it
-		d.s.Broadcast(&p2p.MsgRelayBlock{
-			Header:       b.Header,
-			Transactions: b.Transactions,
-		})
+		d.s.Broadcast(&p2p.MsgRelayBlock{Block: b})
 	}
 }
 

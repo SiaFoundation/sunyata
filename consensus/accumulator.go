@@ -29,7 +29,7 @@ func merkleNodeHash(left, right sunyata.Hash256) sunyata.Hash256 {
 	return sunyata.HashBytes(buf)
 }
 
-func outputLeafHash(o *sunyata.Output, spent bool) sunyata.Hash256 {
+func outputLeafHash(o sunyata.Output, spent bool) sunyata.Hash256 {
 	// TODO: which fields should be hashed?
 	buf := make([]byte, 1+32+8+8+1)
 	n := 0
@@ -48,7 +48,7 @@ func outputLeafHash(o *sunyata.Output, spent bool) sunyata.Hash256 {
 	return sunyata.HashBytes(buf)
 }
 
-func outputProofRoot(o *sunyata.Output, spent bool) sunyata.Hash256 {
+func outputProofRoot(o sunyata.Output, spent bool) sunyata.Hash256 {
 	root := outputLeafHash(o, spent)
 	for i, h := range o.MerkleProof {
 		if o.LeafIndex&(1<<i) == 0 {
@@ -58,6 +58,30 @@ func outputProofRoot(o *sunyata.Output, spent bool) sunyata.Hash256 {
 		}
 	}
 	return root
+}
+
+func outputsByTree(txns []sunyata.Transaction) [64][]sunyata.Output {
+	var trees [64][]sunyata.Output
+	for _, txn := range txns {
+		for i, in := range txn.Inputs {
+			if in.Parent.LeafIndex != sunyata.EphemeralLeafIndex {
+				trees[len(in.Parent.MerkleProof)] = append(trees[len(in.Parent.MerkleProof)], txn.Inputs[i].Parent)
+			}
+		}
+	}
+	for _, outputs := range trees {
+		if len(outputs) > 1 {
+			sort.Slice(outputs, func(i, j int) bool {
+				return outputs[i].LeafIndex < outputs[j].LeafIndex
+			})
+		}
+	}
+	return trees
+}
+
+func splitOutputs(outputs []sunyata.Output, mid uint64) (left, right []sunyata.Output) {
+	split := sort.Search(len(outputs), func(i int) bool { return outputs[i].LeafIndex >= mid })
+	return outputs[:split], outputs[split:]
 }
 
 // A StateAccumulator tracks the state of all outputs.
@@ -74,7 +98,7 @@ func (sa *StateAccumulator) HasTreeAtHeight(height int) bool {
 	return sa.NumLeaves&(1<<height) != 0
 }
 
-func (sa *StateAccumulator) containsOutput(o *sunyata.Output, spent bool) bool {
+func (sa *StateAccumulator) containsOutput(o sunyata.Output, spent bool) bool {
 	root := outputProofRoot(o, spent)
 	start, end := bits.TrailingZeros64(sa.NumLeaves), bits.Len64(sa.NumLeaves)
 	for i := start; i < end; i++ {
@@ -98,7 +122,7 @@ func (sa *StateAccumulator) addNewOutputs(outputs []sunyata.Output, wasSpent fun
 		// Walk "up" the Forest, merging trees of the same height, but before
 		// merging two trees, append each of their roots to the proofs under the
 		// opposite tree.
-		h := outputLeafHash(&outputs[i], wasSpent(outputs[i].ID))
+		h := outputLeafHash(outputs[i], wasSpent(outputs[i].ID))
 		for height := range &sa.Trees {
 			if !sa.HasTreeAtHeight(height) {
 				// no tree at this height; insert the new tree
@@ -146,151 +170,68 @@ func (sa *StateAccumulator) addNewOutputs(outputs []sunyata.Output, wasSpent fun
 	return treeGrowth
 }
 
-// markInputsSpent recomputes the tree roots in the supplied forest when all of
-// the parent Outputs in the supplied txns are "marked as spent," i.e. when
-// their leaf hashes are recomputed with the spent flag set. The Merkle proofs
-// of each parent Output are also updated, such that outputProofRoot(true)
-// returns a root within the new forest for all Outputs. The Outputs are grouped
-// by tree and returned for later use.
-func (sa *StateAccumulator) markInputsSpent(txns []sunyata.Transaction) [64][]sunyata.Output {
-	// Begin by defining a helper function that recursively recomputes subtree
-	// roots. The inputs are the leaf indices bounding the subtree and the spent
-	// outputs within that subtree. The algorithm is as follows:
-	//
-	// First, the base case: if the subtree only contains one spent output, then
-	// we can recompute its root using that output's leaf hash and pre-existing
-	// proof hashes. The only complication here is that we need to trim the set
-	// of proof hashes, such that we recompute just the subtree in question
-	// rather than the top-level tree root.
-	//
-	// Second, the recursive case: if the subtree contains multiple outputs,
-	// then we need to split, recurse and join. We split our subtree into a left
-	// tree and a right tree, grouping the outputs according to which tree they
-	// fall under. Then we recurse on each tree to calculate its root, and join
-	// the left and right roots to produce the root of the subtree. Here, the
-	// complication is that one of the trees may not have any outputs under it!
-	// How, then, can we compute its root?
-	//
-	// The answer is that its root is already present in the Merkle proofs of
-	// the outputs under the other tree. Since none of the leaves under the
-	// "empty" tree have changed, its root is unchanged also, and this root must
-	// be present in the proofs under the other tree. So we augment our
-	// recursive case to use these roots directly where applicable.
-	//
-	// Finally, recall that we have a secondary goal here: rewriting the
-	// existing Merkle proofs such that they target the new root. Fortunately,
-	// this is easy to accommodate. In our recursive case, after we have
-	// recalculated the two tree roots, we simply copy the left-side root into
-	// the right-side proofs, and vice versa.
+// markInputsSpent recomputes the tree roots of the accumulator when all of the
+// parent Outputs in the supplied txns are "marked as spent," i.e. when their
+// leaf hashes are recomputed with the spent flag set. The Merkle proofs of each
+// parent Output are also updated, such that outputProofRoot(true) returns a
+// root within the new accumulator for all Outputs. The Outputs are grouped by
+// tree and returned for later use.
+func (sa *StateAccumulator) markInputsSpent(txns []sunyata.Transaction, proof []sunyata.Hash256) [64][]sunyata.Output {
+	// Define a helper function to recursively recompute subtree roots. As a
+	// side effect, we also fill out the individual Merkle proofs for each
+	// output.
 	var recompute func(i, j uint64, outputs []sunyata.Output) sunyata.Hash256
 	recompute = func(i, j uint64, outputs []sunyata.Output) sunyata.Hash256 {
-		// Define a helper function to split outputs according to a midpoint.
-		splitOutputs := func(os []sunyata.Output, mid uint64) (left, right []sunyata.Output) {
-			split := sort.Search(len(os), func(i int) bool { return os[i].LeafIndex >= mid })
-			return os[:split], os[split:]
-		}
-
 		height := bits.TrailingZeros64(j - i) // equivalent to log2(j-i), as j-i is always a power of two
-		if len(outputs) == 1 {
-			// Base case: there's only one spent output within this subtree.
-			// Calculate the new subtree root by hashing the spent leaf with
-			// the output's existing proof hashes, stopping when we reach
-			// the height of the subtree in question.
-			o := outputs[0]
-			o.MerkleProof = o.MerkleProof[:height]
-			return outputProofRoot(&o, true)
+		if len(outputs) == 0 {
+			// no outputs in this subtree; must have a proof root
+			h := proof[0]
+			proof = proof[1:]
+			return h
 		} else if height == 0 {
-			panic("exactly one output should be present in a height-0 subtree")
+			return outputLeafHash(outputs[0], true)
 		}
-
-		// Recursive case: split, recurse, and join.
 		mid := (i + j) / 2
-		leftOutputs, rightOutputs := splitOutputs(outputs, mid)
-		var leftRoot, rightRoot sunyata.Hash256
-		if len(leftOutputs) == 0 {
-			// None of the leaves under the left-side tree changed, which
-			// means we can find its root within the proofs of the
-			// rightOutputs. Any proof will work -- the root will be the
-			// same in all of them -- but the 0th is guaranteed to exist.
-			leftRoot = rightOutputs[0].MerkleProof[height-1]
-		} else {
-			// At least one leaf under the left-side changed, so we need to
-			// recurse to recompute the root. Once we have it, update the
-			// proofs of the rightOutputs to use the new root.
-			leftRoot = recompute(i, mid, leftOutputs)
-			for i := range rightOutputs {
-				rightOutputs[i].MerkleProof[height-1] = leftRoot
-			}
+		left, right := splitOutputs(outputs, mid)
+		leftRoot := recompute(i, mid, left)
+		rightRoot := recompute(mid, j, right)
+		for i := range right {
+			right[i].MerkleProof[height-1] = leftRoot
 		}
-		if len(rightOutputs) == 0 {
-			rightRoot = leftOutputs[0].MerkleProof[height-1]
-		} else {
-			rightRoot = recompute(mid, j, rightOutputs)
-			for i := range leftOutputs {
-				leftOutputs[i].MerkleProof[height-1] = rightRoot
-			}
+		for i := range left {
+			left[i].MerkleProof[height-1] = rightRoot
 		}
-		// Join the recomputed roots, yielding the root of the full subtree.
 		return merkleNodeHash(leftRoot, rightRoot)
 	}
 
-	// Group inputs by which tree in the forest they belong to.
-	//
-	// TODO: this allocates. The caller should probably provide this memory.
-	var groups [64][]sunyata.Output
-	for _, txn := range txns {
-		for _, in := range txn.Inputs {
-			if in.Parent.LeafIndex == sunyata.EphemeralLeafIndex {
-				continue // skip ephemeral outputs
-			}
-			// The recompute function modifies the proofs of outputs directly, so to avoid
-			// side effects, we make a copy here.
-			in.Parent.MerkleProof = append([]sunyata.Hash256(nil), in.Parent.MerkleProof...)
-			groups[len(in.Parent.MerkleProof)] = append(groups[len(in.Parent.MerkleProof)], in.Parent)
-			// sanity check
-			if !sa.HasTreeAtHeight(len(in.Parent.MerkleProof)) {
-				panic("forest missing tree for output proof")
-			}
-		}
-	}
-	// Recompute each tree.
-	for height, g := range &groups {
-		if len(g) == 0 {
+	// Group the outputs by their tree (and sort them by leaf index) and use
+	// them to recompute the root of each tree.
+	groups := outputsByTree(txns)
+	for height, outputs := range &groups {
+		if len(outputs) == 0 {
 			continue
 		}
-
-		// Sort the outputs by their leaf index.
-		sort.Slice(g, func(i, j int) bool {
-			return g[i].LeafIndex < g[j].LeafIndex
-		})
 
 		// Determine the range of leaf indices that comprise this tree. We can
 		// compute this efficiently by zeroing the least-significant bits of
 		// NumLeaves. (Zeroing these bits is equivalent to subtracting the
 		// number of leaves in all trees smaller than this one.)
 		start := clearBits(sa.NumLeaves, height+1)
-		end := clearBits(sa.NumLeaves, height)
+		end := start + 1<<height
 
-		// Recursively recompute the root of the tree.
-		sa.Trees[height] = recompute(start, end, g)
+		sa.Trees[height] = recompute(start, end, outputs)
 	}
 	return groups
 }
 
 // ComputeMultiproof computes a single Merkle proof for all inputs in txns.
 func ComputeMultiproof(txns []sunyata.Transaction) (proof []sunyata.Hash256) {
-	splitOutputs := func(outputs []*sunyata.Output, mid uint64) (left, right []*sunyata.Output) {
-		split := sort.Search(len(outputs), func(i int) bool { return outputs[i].LeafIndex >= mid })
-		return outputs[:split], outputs[split:]
-	}
-
-	var visit func(i, j uint64, outputs []*sunyata.Output)
-	visit = func(i, j uint64, outputs []*sunyata.Output) {
+	var visit func(i, j uint64, outputs []sunyata.Output)
+	visit = func(i, j uint64, outputs []sunyata.Output) {
 		height := bits.TrailingZeros64(j - i)
 		if height == 0 {
 			return // fully consumed
 		}
-
 		mid := (i + j) / 2
 		left, right := splitOutputs(outputs, mid)
 		if len(left) == 0 {
@@ -305,21 +246,10 @@ func ComputeMultiproof(txns []sunyata.Transaction) (proof []sunyata.Hash256) {
 		}
 	}
 
-	var trees [64][]*sunyata.Output
-	for _, txn := range txns {
-		for i, in := range txn.Inputs {
-			if in.Parent.LeafIndex != sunyata.EphemeralLeafIndex {
-				trees[len(in.Parent.MerkleProof)] = append(trees[len(in.Parent.MerkleProof)], &txn.Inputs[i].Parent)
-			}
-		}
-	}
-	for height, outputs := range trees {
+	for height, outputs := range outputsByTree(txns) {
 		if len(outputs) == 0 {
 			continue
 		}
-		sort.Slice(outputs, func(i, j int) bool {
-			return outputs[i].LeafIndex < outputs[j].LeafIndex
-		})
 		start := clearBits(outputs[0].LeafIndex, height+1)
 		end := start + 1<<height
 		visit(start, end, outputs)
@@ -330,20 +260,15 @@ func ComputeMultiproof(txns []sunyata.Transaction) (proof []sunyata.Hash256) {
 // ExpandMultiproof restores all of the input proofs in txns using the supplied
 // multiproof. The len of each input proof must be the correct size.
 func ExpandMultiproof(txns []sunyata.Transaction, proof []sunyata.Hash256) bool {
-	splitOutputs := func(outputs []*sunyata.Output, mid uint64) (left, right []*sunyata.Output) {
-		split := sort.Search(len(outputs), func(i int) bool { return outputs[i].LeafIndex >= mid })
-		return outputs[:split], outputs[split:]
-	}
-
-	var expand func(i, j uint64, outputs []*sunyata.Output) sunyata.Hash256
-	expand = func(i, j uint64, outputs []*sunyata.Output) sunyata.Hash256 {
+	var expand func(i, j uint64, outputs []sunyata.Output) sunyata.Hash256
+	expand = func(i, j uint64, outputs []sunyata.Output) sunyata.Hash256 {
 		height := bits.TrailingZeros64(j - i)
 		if len(outputs) == 0 {
 			// no outputs in this subtree; must have a proof root
 			h := proof[0]
 			proof = proof[1:]
 			return h
-		} else if len(outputs) == 1 && height == 0 {
+		} else if height == 0 {
 			return outputLeafHash(outputs[0], false)
 		}
 		mid := (i + j) / 2
@@ -360,8 +285,8 @@ func ExpandMultiproof(txns []sunyata.Transaction, proof []sunyata.Hash256) bool 
 	}
 
 	// helper for computing valid proof size
-	var proofSize func(i, j uint64, outputs []*sunyata.Output) int
-	proofSize = func(i, j uint64, outputs []*sunyata.Output) int {
+	var proofSize func(i, j uint64, outputs []sunyata.Output) int
+	proofSize = func(i, j uint64, outputs []sunyata.Output) int {
 		height := bits.TrailingZeros64(j - i)
 		if len(outputs) == 0 {
 			return 1
@@ -373,21 +298,10 @@ func ExpandMultiproof(txns []sunyata.Transaction, proof []sunyata.Hash256) bool 
 		return proofSize(i, mid, left) + proofSize(mid, j, right)
 	}
 
-	var trees [64][]*sunyata.Output
-	for _, txn := range txns {
-		for i, in := range txn.Inputs {
-			if in.Parent.LeafIndex != sunyata.EphemeralLeafIndex {
-				trees[len(in.Parent.MerkleProof)] = append(trees[len(in.Parent.MerkleProof)], &txn.Inputs[i].Parent)
-			}
-		}
-	}
-	for height, outputs := range trees {
+	for height, outputs := range outputsByTree(txns) {
 		if len(outputs) == 0 {
 			continue
 		}
-		sort.Slice(outputs, func(i, j int) bool {
-			return outputs[i].LeafIndex < outputs[j].LeafIndex
-		})
 		start := clearBits(outputs[0].LeafIndex, height+1)
 		end := start + 1<<height
 		if len(proof) < proofSize(start, end, outputs) {
@@ -396,5 +310,40 @@ func ExpandMultiproof(txns []sunyata.Transaction, proof []sunyata.Hash256) bool 
 		expand(start, end, outputs)
 	}
 
+	return len(proof) == 0
+}
+
+func (sa *StateAccumulator) validProof(txns []sunyata.Transaction, proof []sunyata.Hash256) bool {
+	var root func(i, j uint64, outputs []sunyata.Output) sunyata.Hash256
+	root = func(i, j uint64, outputs []sunyata.Output) sunyata.Hash256 {
+		height := bits.TrailingZeros64(j - i)
+		if len(outputs) == 0 {
+			// we should have a proof root for all empty subtrees; if not,
+			// return a hash that is guaranteed to result in the wrong root
+			if len(proof) == 0 {
+				return sunyata.Hash256{}
+			}
+			h := proof[0]
+			proof = proof[1:]
+			return h
+		} else if height == 0 {
+			return outputLeafHash(outputs[0], false)
+		}
+		mid := (i + j) / 2
+		left, right := splitOutputs(outputs, mid)
+		return merkleNodeHash(root(i, mid, left), root(mid, j, right))
+	}
+
+	for height, outputs := range outputsByTree(txns) {
+		if len(outputs) == 0 {
+			continue
+		}
+		start := clearBits(outputs[0].LeafIndex, height+1)
+		end := start + 1<<height
+		if root(start, end, outputs) != sa.Trees[height] {
+			return false
+		}
+	}
+	// there should be no excess proof roots
 	return len(proof) == 0
 }

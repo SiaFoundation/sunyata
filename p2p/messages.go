@@ -3,7 +3,6 @@ package p2p
 import (
 	"bytes"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -44,8 +43,8 @@ func readMessage(r io.Reader) (Message, error) {
 	m := map[uint8]Message{
 		typGetHeaders:          new(MsgGetHeaders),
 		typHeaders:             new(MsgHeaders),
-		typGetTransactions:     new(MsgGetTransactions),
-		typTransactions:        new(MsgTransactions),
+		typGetTransactions:     new(MsgGetBlocks),
+		typTransactions:        new(MsgBlocks),
 		typRelayBlock:          new(MsgRelayBlock),
 		typRelayTransactionSet: new(MsgRelayTransactionSet),
 		typGetCheckpoint:       new(MsgGetCheckpoint),
@@ -73,9 +72,9 @@ func writeMessage(w io.Writer, m Message) error {
 		buf[0] = typGetHeaders
 	case *MsgHeaders:
 		buf[0] = typHeaders
-	case *MsgGetTransactions:
+	case *MsgGetBlocks:
 		buf[0] = typGetTransactions
-	case *MsgTransactions:
+	case *MsgBlocks:
 		buf[0] = typTransactions
 	case *MsgRelayBlock:
 		buf[0] = typRelayBlock
@@ -241,124 +240,72 @@ func (m *MsgHeaders) decodeFrom(b *msgBuffer) {
 	}
 }
 
-// MsgGetTransactions requests the transactions that comprise each of the
-// referenced blocks.
-type MsgGetTransactions struct {
+// MsgGetBlocks requests the referenced blocks.
+type MsgGetBlocks struct {
 	Blocks []sunyata.ChainIndex
 }
 
-func (m *MsgGetTransactions) encodedSize() int {
+func (m *MsgGetBlocks) encodedSize() int {
 	return 4 + len(m.Blocks)*msgChainIndexSize
 }
 
-func (m *MsgGetTransactions) encodeTo(b *msgBuffer) {
+func (m *MsgGetBlocks) encodeTo(b *msgBuffer) {
 	b.writePrefix(len(m.Blocks))
 	for i := range m.Blocks {
 		(*msgChainIndex)(&m.Blocks[i]).encodeTo(b)
 	}
 }
 
-func (m *MsgGetTransactions) decodeFrom(b *msgBuffer) {
+func (m *MsgGetBlocks) decodeFrom(b *msgBuffer) {
 	m.Blocks = make([]sunyata.ChainIndex, b.readPrefix(msgChainIndexSize))
 	for i := range m.Blocks {
 		(*msgChainIndex)(&m.Blocks[i]).decodeFrom(b)
 	}
 }
 
-// MsgTransactions is a response to MsgGetTransactions, containing the requested
-// transactions.
-type MsgTransactions struct {
-	Index  sunyata.ChainIndex
-	Blocks [][]sunyata.Transaction
+// MsgBlocks is a response to MsgGetBlocks, containing the requested
+// blocks.
+type MsgBlocks struct {
+	Blocks []sunyata.Block
 }
 
-func (m *MsgTransactions) encodedSize() int {
-	size := msgChainIndexSize
-	size += 4
+func (m *MsgBlocks) encodedSize() int {
+	size := 4
 	for i := range m.Blocks {
-		size += 4
-		for j := range m.Blocks[i] {
-			size += (*msgTransactionNoProofs)(&m.Blocks[i][j]).encodedSize()
-		}
-		size += 4 + len(consensus.ComputeMultiproof(m.Blocks[i]))*32
+		size += (*msgBlock)(&m.Blocks[i]).encodedSize()
 	}
 	return size
 }
 
-func (m *MsgTransactions) encodeTo(b *msgBuffer) {
-	(*msgChainIndex)(&m.Index).encodeTo(b)
+func (m *MsgBlocks) encodeTo(b *msgBuffer) {
 	b.writePrefix(len(m.Blocks))
 	for i := range m.Blocks {
-		b.writePrefix(len(m.Blocks[i]))
-		for j := range m.Blocks[i] {
-			(*msgTransactionNoProofs)(&m.Blocks[i][j]).encodeTo(b)
-		}
-		proof := consensus.ComputeMultiproof(m.Blocks[i])
-		b.writePrefix(len(proof))
-		for j := range proof {
-			b.writeHash(proof[j])
-		}
+		(*msgBlock)(&m.Blocks[i]).encodeTo(b)
 	}
 }
 
-func (m *MsgTransactions) decodeFrom(b *msgBuffer) {
-	(*msgChainIndex)(&m.Index).decodeFrom(b)
-	m.Blocks = make([][]sunyata.Transaction, b.readPrefix(4))
+func (m *MsgBlocks) decodeFrom(b *msgBuffer) {
+	m.Blocks = make([]sunyata.Block, b.readPrefix(4))
 	for i := range m.Blocks {
-		m.Blocks[i] = make([]sunyata.Transaction, b.readPrefix(minTxnSize))
-		for j := range m.Blocks[i] {
-			(*msgTransactionNoProofs)(&m.Blocks[i][j]).decodeFrom(b)
-		}
-		proof := make([]sunyata.Hash256, b.readPrefix(32))
-		for i := range proof {
-			proof[i] = b.readHash()
-		}
-		if b.err == nil && !consensus.ExpandMultiproof(m.Blocks[i], proof) {
-			b.err = errors.New("invalid multiproof")
-		}
+		(*msgBlock)(&m.Blocks[i]).decodeFrom(b)
 	}
 }
 
 // MsgRelayBlock relays a block.
 type MsgRelayBlock struct {
-	Header         sunyata.BlockHeader
-	TransactionIDs []sunyata.TransactionID
-	Transactions   []sunyata.Transaction
+	Block sunyata.Block
 }
 
 func (m *MsgRelayBlock) encodedSize() int {
-	size := msgBlockHeaderSize
-	size += 4 + len(m.TransactionIDs)*32
-	size += 4
-	for i := range m.Transactions {
-		size += (*msgTransaction)(&m.Transactions[i]).encodedSize()
-	}
-	return size
+	return (*msgBlock)(&m.Block).encodedSize()
 }
 
 func (m *MsgRelayBlock) encodeTo(b *msgBuffer) {
-	// TODO: a custom encoding could save many bytes here
-	(*msgBlockHeader)(&m.Header).encodeTo(b)
-	b.writePrefix(len(m.TransactionIDs))
-	for i := range m.TransactionIDs {
-		b.writeHash(m.TransactionIDs[i])
-	}
-	b.writePrefix(len(m.Transactions))
-	for i := range m.Transactions {
-		(*msgTransaction)(&m.Transactions[i]).encodeTo(b)
-	}
+	(*msgBlock)(&m.Block).encodeTo(b)
 }
 
 func (m *MsgRelayBlock) decodeFrom(b *msgBuffer) {
-	(*msgBlockHeader)(&m.Header).decodeFrom(b)
-	m.TransactionIDs = make([]sunyata.TransactionID, b.readPrefix(32))
-	for i := range m.TransactionIDs {
-		m.TransactionIDs[i] = b.readHash()
-	}
-	m.Transactions = make([]sunyata.Transaction, b.readPrefix(minTxnSize))
-	for i := range m.Transactions {
-		(*msgTransaction)(&m.Transactions[i]).decodeFrom(b)
-	}
+	(*msgBlock)(&m.Block).decodeFrom(b)
 }
 
 // MsgRelayTransactionSet relays a transaction set for inclusion in the txpool.
@@ -602,6 +549,42 @@ func (m *msgTransactionNoProofs) decodeFrom(b *msgBuffer) {
 		out.Address = b.readHash()
 	}
 	m.MinerFee = b.readCurrency()
+}
+
+type msgBlock sunyata.Block
+
+func (m *msgBlock) encodedSize() int {
+	size := msgBlockHeaderSize
+	size += 4
+	for i := range m.Transactions {
+		size += (*msgTransactionNoProofs)(&m.Transactions[i]).encodedSize()
+	}
+	size += 4 + len(m.AccumulatorProof)*32
+	return size
+}
+
+func (m *msgBlock) encodeTo(b *msgBuffer) {
+	(*msgBlockHeader)(&m.Header).encodeTo(b)
+	b.writePrefix(len(m.Transactions))
+	for i := range m.Transactions {
+		(*msgTransactionNoProofs)(&m.Transactions[i]).encodeTo(b)
+	}
+	b.writePrefix(len(m.AccumulatorProof))
+	for i := range m.AccumulatorProof {
+		b.writeHash(m.AccumulatorProof[i])
+	}
+}
+
+func (m *msgBlock) decodeFrom(b *msgBuffer) {
+	(*msgBlockHeader)(&m.Header).decodeFrom(b)
+	m.Transactions = make([]sunyata.Transaction, b.readPrefix(minTxnSize))
+	for i := range m.Transactions {
+		(*msgTransactionNoProofs)(&m.Transactions[i]).decodeFrom(b)
+	}
+	m.AccumulatorProof = make([]sunyata.Hash256, b.readPrefix(32))
+	for i := range m.AccumulatorProof {
+		m.AccumulatorProof[i] = b.readHash()
+	}
 }
 
 type msgValidationContext consensus.ValidationContext

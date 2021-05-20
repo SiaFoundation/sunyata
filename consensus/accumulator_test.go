@@ -95,7 +95,7 @@ func TestAccumulator(t *testing.T) {
 		if update1.OutputWasSpent(o.LeafIndex) {
 			t.Error("update should not mark output as spent:", o)
 		}
-		if update1.Context.State.containsOutput(&o, true) || !update1.Context.State.containsOutput(&o, false) {
+		if update1.Context.State.containsOutput(o, true) || !update1.Context.State.containsOutput(o, false) {
 			t.Error("accumulator should contain unspent output:", o)
 		}
 	}
@@ -120,7 +120,8 @@ func TestAccumulator(t *testing.T) {
 			ParentID:     genesisID,
 			MinerAddress: randAddr(),
 		},
-		Transactions: []sunyata.Transaction{txn},
+		Transactions:     []sunyata.Transaction{txn},
+		AccumulatorProof: ComputeMultiproof([]sunyata.Transaction{txn}),
 	}
 
 	update2 := ApplyBlock(update1.Context, b)
@@ -137,11 +138,11 @@ func TestAccumulator(t *testing.T) {
 	// the new accumulator should contain both the spent and unspent outputs
 	for _, o := range origOutputs {
 		if update2.OutputWasSpent(o.LeafIndex) {
-			if update2.Context.State.containsOutput(&o, false) || !update2.Context.State.containsOutput(&o, true) {
+			if update2.Context.State.containsOutput(o, false) || !update2.Context.State.containsOutput(o, true) {
 				t.Error("accumulator should contain spent output:", o)
 			}
 		} else {
-			if update2.Context.State.containsOutput(&o, true) || !update2.Context.State.containsOutput(&o, false) {
+			if update2.Context.State.containsOutput(o, true) || !update2.Context.State.containsOutput(o, false) {
 				t.Error("accumulator should contain unspent output:", o)
 			}
 		}
@@ -169,7 +170,7 @@ func TestAccumulator(t *testing.T) {
 		if update1.OutputWasSpent(o.LeafIndex) {
 			t.Error("update should not mark output as spent:", o)
 		}
-		if update1.Context.State.containsOutput(&o, true) {
+		if update1.Context.State.containsOutput(o, true) {
 			t.Error("output should not be marked as spent:", o)
 		}
 	}
@@ -210,7 +211,8 @@ func TestAccumulator(t *testing.T) {
 			ParentID:     b.ID(),
 			MinerAddress: randAddr(),
 		},
-		Transactions: []sunyata.Transaction{parentTxn, childTxn},
+		Transactions:     []sunyata.Transaction{parentTxn, childTxn},
+		AccumulatorProof: ComputeMultiproof([]sunyata.Transaction{parentTxn, childTxn}),
 	}
 
 	update3 := ApplyBlock(update2.Context, b)
@@ -227,11 +229,11 @@ func TestAccumulator(t *testing.T) {
 	// the new accumulator should contain both the spent and unspent outputs
 	for _, o := range origOutputs {
 		if update2.OutputWasSpent(o.LeafIndex) || update3.OutputWasSpent(o.LeafIndex) {
-			if update3.Context.State.containsOutput(&o, false) || !update3.Context.State.containsOutput(&o, true) {
+			if update3.Context.State.containsOutput(o, false) || !update3.Context.State.containsOutput(o, true) {
 				t.Error("accumulator should contain spent output:", o)
 			}
 		} else {
-			if update3.Context.State.containsOutput(&o, true) || !update3.Context.State.containsOutput(&o, false) {
+			if update3.Context.State.containsOutput(o, true) || !update3.Context.State.containsOutput(o, false) {
 				t.Error("accumulator should contain unspent output:", o)
 			}
 		}
@@ -293,7 +295,8 @@ func TestAccumulatorRevert(t *testing.T) {
 			ParentID:     genesisID,
 			MinerAddress: randAddr(),
 		},
-		Transactions: []sunyata.Transaction{txn},
+		Transactions:     []sunyata.Transaction{txn},
+		AccumulatorProof: ComputeMultiproof([]sunyata.Transaction{txn}),
 	}
 
 	update2 := ApplyBlock(update1.Context, b)
@@ -321,7 +324,7 @@ func TestAccumulatorRevert(t *testing.T) {
 		if update1.OutputWasSpent(o.LeafIndex) {
 			t.Error("update should not mark output as spent:", o)
 		}
-		if !update1.Context.State.containsOutput(&o, false) {
+		if !update1.Context.State.containsOutput(o, false) {
 			t.Error("output should be in the accumulator, marked as unspent:", o)
 		}
 	}
@@ -345,10 +348,10 @@ func TestMarkInputsSpent(t *testing.T) {
 		},
 	}}
 
-	acc.markInputsSpent(txns)
+	acc.markInputsSpent(txns, ComputeMultiproof(txns))
 
 	var acc2 StateAccumulator
-	addOutput := func(o *sunyata.Output, spent bool) {
+	addOutput := func(o sunyata.Output, spent bool) {
 		// seek to first open slot, merging nodes as we go
 		root := outputLeafHash(o, spent)
 		i := 0
@@ -361,9 +364,9 @@ func TestMarkInputsSpent(t *testing.T) {
 	for i, o := range outputs {
 		switch i {
 		case 0, 2, 3, 5, 6:
-			addOutput(&o, true)
+			addOutput(o, true)
 		default:
-			addOutput(&o, false)
+			addOutput(o, false)
 		}
 	}
 	for i := range acc2.Trees {
@@ -384,7 +387,7 @@ func TestMultiproof(t *testing.T) {
 	for i := range outputs {
 		outputs[i].LeafIndex = uint64(i)
 		outputs[i].ID.BeneficiaryIndex = uint64(i)
-		leaves[i] = outputLeafHash(&outputs[i], false)
+		leaves[i] = outputLeafHash(outputs[i], false)
 	}
 	node01 := merkleNodeHash(leaves[0], leaves[1])
 	node23 := merkleNodeHash(leaves[2], leaves[3])
@@ -450,7 +453,7 @@ func BenchmarkOutputLeaf(b *testing.B) {
 	var o sunyata.Output
 	o.MerkleProof = make([]sunyata.Hash256, 25)
 	for i := 0; i < b.N; i++ {
-		outputProofRoot(&o, true)
+		outputProofRoot(o, true)
 	}
 }
 
@@ -488,6 +491,7 @@ func BenchmarkMarkInputs(b *testing.B) {
 	for i, j := range indices {
 		txns[0].Inputs[i].Parent = outputs[j]
 	}
+	proof := ComputeMultiproof(txns)
 
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -500,6 +504,6 @@ func BenchmarkMarkInputs(b *testing.B) {
 		}
 		b.StartTimer()
 
-		acc2.markInputsSpent(txns)
+		acc2.markInputsSpent(txns, proof)
 	}
 }

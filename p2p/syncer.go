@@ -45,10 +45,10 @@ func (s *Syncer) handleMessage(p *Peer, msg Message) {
 		s.processMsgGetHeaders(p, msg)
 	case *MsgHeaders:
 		s.processMsgHeaders(p, msg)
-	case *MsgGetTransactions:
-		s.processMsgGetTransactions(p, msg)
-	case *MsgTransactions:
-		s.processMsgTransactions(p, msg)
+	case *MsgGetBlocks:
+		s.processMsgGetBlocks(p, msg)
+	case *MsgBlocks:
+		s.processMsgBlocks(p, msg)
 	case *MsgRelayBlock:
 		s.processMsgRelayBlock(p, msg)
 	case *MsgRelayTransactionSet:
@@ -140,61 +140,58 @@ func (s *Syncer) processMsgHeaders(p *Peer, msg *MsgHeaders) {
 	if len(blocks) > 10 {
 		blocks = blocks[:10]
 	}
-	p.queue(&MsgGetTransactions{Blocks: blocks})
+	p.queue(&MsgGetBlocks{Blocks: blocks})
 }
 
-func (s *Syncer) processMsgGetTransactions(p *Peer, msg *MsgGetTransactions) {
-	// peer is requesting transactions
+func (s *Syncer) processMsgGetBlocks(p *Peer, msg *MsgGetBlocks) {
+	// peer is requesting blocks
 
 	if len(msg.Blocks) == 0 {
-		p.ban(errors.New("empty getTransactions message"))
+		p.ban(fmt.Errorf("empty %T", msg))
 		return
 	}
 
-	var blocks [][]sunyata.Transaction
+	var blocks []sunyata.Block
 	for _, index := range msg.Blocks {
 		b, err := s.cm.Block(index)
 		if errors.Is(err, chain.ErrPruned) {
 			break // nothing we can do
 		} else if errors.Is(err, chain.ErrUnknownIndex) {
-			p.warn(fmt.Errorf("peer requested transactions from blocks we don't have"))
+			p.warn(fmt.Errorf("peer requested blocks we don't have"))
 			break
 		} else if err != nil {
 			s.setErr(fmt.Errorf("%T: couldn't load transactions: %w", msg, err))
 			return
 		}
-		blocks = append(blocks, b.Transactions)
+		blocks = append(blocks, b)
 	}
 	if len(blocks) > 0 {
-		p.queue(&MsgTransactions{
-			Index:  msg.Blocks[0],
-			Blocks: blocks,
-		})
+		p.queue(&MsgBlocks{Blocks: blocks})
 	}
 }
 
-func (s *Syncer) processMsgTransactions(p *Peer, msg *MsgTransactions) {
-	// peer is sending us the transactions for each block we requested;
-	// they should match up exactly with one of our existing scratch chains.
+func (s *Syncer) processMsgBlocks(p *Peer, msg *MsgBlocks) {
+	// peer is sending us the blocks we requested; they should match up exactly
+	// with one of our existing scratch chains.
 
-	sc, err := s.cm.AddTransactions(msg.Index, msg.Blocks)
+	sc, err := s.cm.AddBlocks(msg.Blocks)
 	if errors.Is(err, chain.ErrUnknownIndex) {
-		p.warn(fmt.Errorf("%T: non-attaching transactions: %w", msg, err))
+		p.warn(fmt.Errorf("%T: non-attaching blocks: %w", msg, err))
 		return
 	} else if err != nil {
-		s.setErr(fmt.Errorf("%T: couldn't add transactions: %w", msg, err))
+		s.setErr(fmt.Errorf("%T: couldn't add blocks: %w", msg, err))
 		return
 	}
 	if blocks := sc.Unvalidated(); len(blocks) > 0 {
-		// request the next set of transactions
+		// request the next set of blocks
 		if len(blocks) > 10 {
 			blocks = blocks[:10]
 		}
-		p.queue(&MsgGetTransactions{Blocks: blocks})
+		p.queue(&MsgGetBlocks{Blocks: blocks})
 		return
 	}
 
-	// request the next set of headers, if there is one
+	// request the next set of headers
 	tip := []sunyata.ChainIndex{sc.ValidTip()}
 	p.queue(&MsgGetHeaders{History: tip})
 }
@@ -202,18 +199,7 @@ func (s *Syncer) processMsgTransactions(p *Peer, msg *MsgTransactions) {
 func (s *Syncer) processMsgRelayBlock(p *Peer, msg *MsgRelayBlock) {
 	// peer is relaying a block
 
-	// construct the block
-	//
-	// TODO: eventually, MsgRelayBlock should mostly contain TransactionIDs,
-	// plus any transactions that the peer thinks we don't have. If we're still
-	// missing some transactions, we'll need to send a follow-up request. For
-	// now, MsgRelayBlock always contains the full block.
-	b := sunyata.Block{
-		Header:       msg.Header,
-		Transactions: msg.Transactions,
-	}
-
-	err := s.cm.AddTipBlock(b)
+	err := s.cm.AddTipBlock(msg.Block)
 	if errors.Is(err, chain.ErrKnownBlock) {
 		// avoid relaying a block multiple times
 		return

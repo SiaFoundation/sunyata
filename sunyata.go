@@ -186,11 +186,11 @@ func (h BlockHeader) ID() BlockID {
 // CurrentTimestamp returns the current time, rounded to the nearest second.
 func CurrentTimestamp() time.Time { return time.Now().Round(time.Second) }
 
-// A Block is a set of Transactions, along with a header and the recipient of
-// the block reward.
+// A Block is a set of Transactions, along with a header and proof data.
 type Block struct {
-	Header       BlockHeader
-	Transactions []Transaction
+	Header           BlockHeader
+	Transactions     []Transaction
+	AccumulatorProof []Hash256
 }
 
 // ID returns a hash that uniquely identifies a block. It is equivalent to

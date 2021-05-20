@@ -63,7 +63,7 @@ func (sau *StateApplyUpdate) UpdateOutputProof(o *sunyata.Output) {
 			// calling ProofRoot.
 			copy(o.MerkleProof[bestMergeHeight:], best.MerkleProof[bestMergeHeight:])
 			best.MerkleProof = best.MerkleProof[:bestMergeHeight-1]
-			o.MerkleProof[bestMergeHeight-1] = outputProofRoot(&best, true)
+			o.MerkleProof[bestMergeHeight-1] = outputProofRoot(best, true)
 		}
 	}
 	// Update the proof to incorporate the "growth" of the tree it was in.
@@ -91,7 +91,7 @@ func applyHeader(vc ValidationContext, h sunyata.BlockHeader) ValidationContext 
 func ApplyBlock(vc ValidationContext, b sunyata.Block) (sau StateApplyUpdate) {
 	sau.Context = applyHeader(vc, b.Header)
 
-	sau.spentOutputs = sau.Context.State.markInputsSpent(b.Transactions)
+	sau.spentOutputs = sau.Context.State.markInputsSpent(b.Transactions, b.AccumulatorProof)
 
 	// create block reward output
 	numOutputs := 1
@@ -205,7 +205,7 @@ func (sru *StateRevertUpdate) UpdateOutputProof(o *sunyata.Output) {
 		// ProofRoot.
 		copy(o.MerkleProof[bestMergeHeight:], best.MerkleProof[bestMergeHeight:])
 		best.MerkleProof = best.MerkleProof[:bestMergeHeight-1]
-		o.MerkleProof[bestMergeHeight-1] = outputProofRoot(&best, false)
+		o.MerkleProof[bestMergeHeight-1] = outputProofRoot(best, false)
 	}
 }
 

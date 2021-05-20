@@ -46,17 +46,13 @@ func TestSyncer(t *testing.T) {
 	_ = testPeerResponse(t, n1.s, &MsgHeaders{
 		Headers: chainutil.JustHeaders(sim.Chain),
 	})
-	_ = testPeerResponse(t, n1.s, &MsgTransactions{
-		Index:  sim.Chain[0].Index(),
-		Blocks: chainutil.JustTransactions(sim.Chain),
+	_ = testPeerResponse(t, n1.s, &MsgBlocks{
+		Blocks: sim.Chain,
 	})
 
 	// relay just the tip to n2; it should request the rest
 	b := sim.Chain[len(sim.Chain)-1]
-	n1.s.Broadcast(&MsgRelayBlock{
-		Header:       b.Header,
-		Transactions: b.Transactions,
-	})
+	n1.s.Broadcast(&MsgRelayBlock{b})
 
 	time.Sleep(time.Second)
 	if n1.c.Tip() != n2.c.Tip() {
@@ -143,7 +139,7 @@ func TestMsgHeaders(t *testing.T) {
 	outbox = testPeerResponse(t, n.s, &MsgHeaders{
 		Headers: headers[0:1],
 	})
-	exp := &MsgGetTransactions{
+	exp := &MsgGetBlocks{
 		Blocks: []sunyata.ChainIndex{{Height: 1, ID: headers[0].ID()}},
 	}
 	if !reflect.DeepEqual(outbox, exp) {
@@ -153,7 +149,7 @@ func TestMsgHeaders(t *testing.T) {
 	outbox = testPeerResponse(t, n.s, &MsgHeaders{
 		Headers: headers[1:2],
 	})
-	exp = &MsgGetTransactions{
+	exp = &MsgGetBlocks{
 		Blocks: []sunyata.ChainIndex{
 			{Height: 1, ID: headers[0].ID()},
 			{Height: 2, ID: headers[1].ID()},
@@ -164,7 +160,7 @@ func TestMsgHeaders(t *testing.T) {
 	}
 }
 
-func TestMsgGetTransactions(t *testing.T) {
+func TestMsgGetBlocks(t *testing.T) {
 	sim := chainutil.NewChainSim()
 	n := newTestNode(t, sim.Genesis.Context.Index.ID, sim.Genesis)
 
@@ -177,7 +173,7 @@ func TestMsgGetTransactions(t *testing.T) {
 	}
 
 	// request a random ID; should return nothing
-	outbox := testPeerResponse(t, n.s, &MsgGetTransactions{
+	outbox := testPeerResponse(t, n.s, &MsgGetBlocks{
 		Blocks: []sunyata.ChainIndex{{
 			Height: 0,
 			ID:     sunyata.BlockID{1, 2, 3},
@@ -187,7 +183,7 @@ func TestMsgGetTransactions(t *testing.T) {
 		t.Fatal("expected nil, got", outbox)
 	}
 	// request an unknown block height; should return nothing
-	outbox = testPeerResponse(t, n.s, &MsgGetTransactions{
+	outbox = testPeerResponse(t, n.s, &MsgGetBlocks{
 		Blocks: []sunyata.ChainIndex{{
 			Height: 4000,
 			ID:     sim.Chain[1].ID(),
@@ -197,7 +193,7 @@ func TestMsgGetTransactions(t *testing.T) {
 		t.Fatal("expected nil, got", outbox)
 	}
 	// request a valid block; should return its transactions
-	outbox = testPeerResponse(t, n.s, &MsgGetTransactions{
+	outbox = testPeerResponse(t, n.s, &MsgGetBlocks{
 		Blocks: []sunyata.ChainIndex{{
 			Height: sim.Chain[11].Header.Height,
 			ID:     sim.Chain[11].ID(),
@@ -206,16 +202,15 @@ func TestMsgGetTransactions(t *testing.T) {
 	// NOTE: DeepEqual treats []T(nil) and []T{} differently, so load the
 	// transactions from our Store instead of using the ones already in memory
 	b12, _ := n.cs.Checkpoint(sim.Chain[11].Index())
-	exp := &MsgTransactions{
-		Index:  b12.Context.Index,
-		Blocks: [][]sunyata.Transaction{b12.Block.Transactions},
+	exp := &MsgBlocks{
+		Blocks: []sunyata.Block{b12.Block},
 	}
 	if !reflect.DeepEqual(outbox, exp) {
 		t.Errorf("\nexpected:\n\t%v\ngot:\n\t%v\n", exp, outbox)
 	}
 }
 
-func TestMsgTransactions(t *testing.T) {
+func TestMsgBlocks(t *testing.T) {
 	sim := chainutil.NewChainSim()
 	n := newTestNode(t, sim.Genesis.Context.Index.ID, sim.Genesis)
 
@@ -226,7 +221,7 @@ func TestMsgTransactions(t *testing.T) {
 	outbox := testPeerResponse(t, n.s, &MsgHeaders{
 		Headers: chainutil.JustHeaders(sim.Chain[:3]),
 	})
-	var exp Message = &MsgGetTransactions{
+	var exp Message = &MsgGetBlocks{
 		Blocks: chainutil.JustChainIndexes(sim.Chain[:3]),
 	}
 	if !reflect.DeepEqual(outbox, exp) {
@@ -237,9 +232,8 @@ func TestMsgTransactions(t *testing.T) {
 	}
 
 	// send transactions; should reorg
-	outbox = testPeerResponse(t, n.s, &MsgTransactions{
-		Index:  sim.Chain[0].Index(),
-		Blocks: chainutil.JustTransactions(sim.Chain[0:3]),
+	outbox = testPeerResponse(t, n.s, &MsgBlocks{
+		Blocks: sim.Chain[0:3],
 	})
 	exp = &MsgGetHeaders{
 		History: chainutil.JustChainIndexes(sim.Chain[2:3]),
@@ -263,19 +257,13 @@ func TestMsgRelayBlock(t *testing.T) {
 	// mine a block and relay it; should be accepted and relayed
 	sim.MineBlocks(1)
 	b := sim.Chain[0]
-	n.s.handleMessage(new(Peer), &MsgRelayBlock{
-		Header:       b.Header,
-		Transactions: b.Transactions,
-	})
+	n.s.handleMessage(new(Peer), &MsgRelayBlock{b})
 	if len(relay.out) == 0 {
 		t.Fatal("expected relay")
 	}
 
 	// send the block again; should no-op
-	outbox := testPeerResponse(t, n.s, &MsgRelayBlock{
-		Header:       b.Header,
-		Transactions: b.Transactions,
-	})
+	outbox := testPeerResponse(t, n.s, &MsgRelayBlock{b})
 	if outbox != nil {
 		t.Fatal("expected empty outbox, got", outbox)
 	}
@@ -290,7 +278,9 @@ func TestMsgRelayBlock(t *testing.T) {
 
 	// send an orphan header; should send history
 	outbox = testPeerResponse(t, n.s, &MsgRelayBlock{
-		Header: sunyata.BlockHeader{Height: 5000},
+		Block: sunyata.Block{
+			Header: sunyata.BlockHeader{Height: 5000},
+		},
 	})
 	headers := chainutil.JustHeaders(sim.Chain)
 	exp := &MsgGetHeaders{
@@ -330,12 +320,11 @@ func TestMultiplePeers(t *testing.T) {
 	outbox := testPeerResponse(t, n.s, &MsgHeaders{
 		Headers: chainutil.JustHeaders(sim.Chain),
 	})
-	if _, ok := outbox.(*MsgGetTransactions); !ok {
-		t.Error("expected MsgGetTransactions")
+	if _, ok := outbox.(*MsgGetBlocks); !ok {
+		t.Error("expected MsgGetBlocks")
 	}
-	outbox = testPeerResponse(t, n.s, &MsgTransactions{
-		Index:  sim.Chain[0].Index(),
-		Blocks: chainutil.JustTransactions(sim.Chain),
+	outbox = testPeerResponse(t, n.s, &MsgBlocks{
+		Blocks: sim.Chain,
 	})
 	if _, ok := outbox.(*MsgGetHeaders); !ok {
 		t.Error("expected MsgGetHeaders")
@@ -362,20 +351,19 @@ func TestMultiplePeers(t *testing.T) {
 	outbox = testPeerResponse(t, n.s, &MsgHeaders{
 		Headers: chainutil.JustHeaders(blocks2),
 	})
-	if _, ok := outbox.(*MsgGetTransactions); !ok {
-		t.Error("expected MsgGetTransactions")
+	if _, ok := outbox.(*MsgGetBlocks); !ok {
+		t.Error("expected MsgGetBlocks")
 	}
 
 	// send headers1, then blocks1
 	outbox = testPeerResponse(t, n.s, &MsgHeaders{
 		Headers: chainutil.JustHeaders(blocks1),
 	})
-	if _, ok := outbox.(*MsgGetTransactions); !ok {
-		t.Error("expected MsgGetTransactions")
+	if _, ok := outbox.(*MsgGetBlocks); !ok {
+		t.Error("expected MsgGetBlocks")
 	}
-	outbox = testPeerResponse(t, n.s, &MsgTransactions{
-		Index:  blocks1[0].Index(),
-		Blocks: chainutil.JustTransactions(blocks1),
+	outbox = testPeerResponse(t, n.s, &MsgBlocks{
+		Blocks: blocks1,
 	})
 	if _, ok := outbox.(*MsgGetHeaders); !ok {
 		t.Error("expected MsgGetHeaders")
@@ -395,9 +383,8 @@ func TestMultiplePeers(t *testing.T) {
 	}
 
 	// send blocks2
-	outbox = testPeerResponse(t, n.s, &MsgTransactions{
-		Index:  blocks2[0].Index(),
-		Blocks: chainutil.JustTransactions(blocks2),
+	outbox = testPeerResponse(t, n.s, &MsgBlocks{
+		Blocks: blocks2,
 	})
 	if _, ok := outbox.(*MsgGetHeaders); !ok {
 		t.Error("expected MsgGetHeaders")

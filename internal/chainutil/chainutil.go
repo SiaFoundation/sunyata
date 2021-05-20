@@ -85,10 +85,11 @@ func (cs *ChainSim) MineBlockWithTxns(txns ...sunyata.Transaction) sunyata.Block
 			Nonce:        cs.nonce,
 			Timestamp:    prev.Timestamp.Add(time.Second),
 			MinerAddress: sunyata.VoidAddress,
-			Commitment:   cs.Context.Commitment(sunyata.VoidAddress, txns),
 		},
-		Transactions: txns,
+		Transactions:     txns,
+		AccumulatorProof: consensus.ComputeMultiproof(txns),
 	}
+	b.Header.Commitment = cs.Context.Commitment(b.Header.MinerAddress, b.Transactions, b.AccumulatorProof)
 	FindBlockNonce(&b.Header, sunyata.HashRequiringWork(cs.Context.Difficulty))
 
 	sau := consensus.ApplyBlock(cs.Context, b)

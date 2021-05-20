@@ -245,14 +245,16 @@ func (m *Manager) AddHeaders(headers []sunyata.BlockHeader) (*consensus.ScratchC
 	return nil, nil
 }
 
-// AddTransactions adds the transactions of a sequence of blocks to a known
-// ScratchChain. If the transactions are valid, the ScratchChain may become the
-// new best chain, triggering a reorg.
-//
-// TODO: return an error if txns do not attach to best header chain?
-func (m *Manager) AddTransactions(index sunyata.ChainIndex, blocks [][]sunyata.Transaction) (*consensus.ScratchChain, error) {
+// AddBlocks adds a sequence of blocks to a known ScratchChain. If the blocks
+// are valid, the ScratchChain may become the new best chain, triggering a
+// reorg.
+func (m *Manager) AddBlocks(blocks []sunyata.Block) (*consensus.ScratchChain, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if len(blocks) == 0 {
+		return nil, nil
+	}
+	index := blocks[0].Index()
 	var chain *consensus.ScratchChain
 	for _, sc := range m.chains {
 		if !sc.FullyValidated() && sc.ValidTip().Height >= (index.Height-1) && sc.Contains(index) {
@@ -269,10 +271,10 @@ func (m *Manager) AddTransactions(index sunyata.ChainIndex, blocks [][]sunyata.T
 	have := chain.ValidTip().Height - (index.Height - 1)
 	blocks = blocks[have:]
 
-	for _, txns := range blocks {
-		c, err := chain.ApplyBlockTransactions(txns)
+	for _, b := range blocks {
+		c, err := chain.ApplyBlock(b)
 		if err != nil {
-			return nil, fmt.Errorf("invalid transactions for block %v: %w", chain.UnvalidatedBase(), err)
+			return nil, fmt.Errorf("invalid block %v: %w", chain.UnvalidatedBase(), err)
 		} else if err := m.store.AddCheckpoint(c); err != nil {
 			return nil, fmt.Errorf("couldn't store block: %w", err)
 		} else if c.Context.TotalWork.Cmp(m.vc.TotalWork) <= 0 {
