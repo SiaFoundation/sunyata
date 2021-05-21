@@ -78,7 +78,7 @@ func DownloadCheckpoint(ctx context.Context, addr string, genesisID sunyata.Bloc
 	}
 
 	// validate response
-	if msg.Block.Index() != index {
+	if msg.Block.Index() != index || msg.Block.Header.ParentIndex() != msg.ParentContext.Index {
 		return consensus.Checkpoint{}, errors.New("wrong checkpoint header")
 	}
 	commitment := msg.ParentContext.Commitment(msg.Block.Header.MinerAddress, msg.Block.Transactions, msg.Block.AccumulatorProof)
