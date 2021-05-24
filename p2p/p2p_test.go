@@ -100,7 +100,7 @@ func (tn *testNode) mine() {
 func newTestNode(tb testing.TB, genesisID sunyata.BlockID, c consensus.Checkpoint) *testNode {
 	cs := chainutil.NewEphemeralStore(c)
 	cm := chain.NewManager(cs, c.Context)
-	tp := txpool.New()
+	tp := txpool.New(c.Context)
 	cm.AddSubscriber(tp, cm.Tip())
 	ws := walletutil.NewEphemeralStore()
 	w := wallet.NewHotWallet(ws, wallet.NewSeed())

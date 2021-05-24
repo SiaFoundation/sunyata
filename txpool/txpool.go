@@ -134,8 +134,9 @@ outer:
 }
 
 // New creates a new transaction pool.
-func New() *Pool {
+func New(vc consensus.ValidationContext) *Pool {
 	return &Pool{
 		txns: make(map[sunyata.TransactionID]sunyata.Transaction),
+		vc:   vc,
 	}
 }

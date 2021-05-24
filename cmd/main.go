@@ -285,7 +285,7 @@ func newNode(addr, dir, seedStr string, c consensus.Checkpoint) (*node, error) {
 	}
 
 	cm := chain.NewManager(chainStore, tip.Context)
-	tp := txpool.New()
+	tp := txpool.New(tip.Context)
 	cm.AddSubscriber(tp, cm.Tip())
 	if err := cm.AddSubscriber(walletStore, walletTip); err != nil {
 		return nil, err
