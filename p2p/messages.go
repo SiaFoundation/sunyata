@@ -597,6 +597,12 @@ func (m *msgValidationContext) encodedSize() int {
 			n += 32
 		}
 	}
+	n += 8
+	for i := range m.History.Trees {
+		if m.History.HasTreeAtHeight(i) {
+			n += 32
+		}
+	}
 	n += 32
 	n += 32
 	n += 8
@@ -610,6 +616,12 @@ func (m *msgValidationContext) encodeTo(b *msgBuffer) {
 	for i := range m.State.Trees {
 		if m.State.HasTreeAtHeight(i) {
 			b.writeHash(m.State.Trees[i])
+		}
+	}
+	b.writeUint64(m.History.NumLeaves)
+	for i := range m.History.Trees {
+		if m.History.HasTreeAtHeight(i) {
+			b.writeHash(m.History.Trees[i])
 		}
 	}
 	b.writeHash(m.TotalWork.NumHashes)
@@ -626,6 +638,12 @@ func (m *msgValidationContext) decodeFrom(b *msgBuffer) {
 	for i := range m.State.Trees {
 		if m.State.HasTreeAtHeight(i) {
 			m.State.Trees[i] = b.readHash()
+		}
+	}
+	m.History.NumLeaves = b.readUint64()
+	for i := range m.History.Trees {
+		if m.History.HasTreeAtHeight(i) {
+			m.History.Trees[i] = b.readHash()
 		}
 	}
 	m.TotalWork.NumHashes = b.readHash()

@@ -31,6 +31,7 @@ var hasherPool = &sync.Pool{New: func() interface{} { return sunyata.NewHasher()
 type ValidationContext struct {
 	Index          sunyata.ChainIndex
 	State          StateAccumulator
+	History        HistoryAccumulator
 	TotalWork      sunyata.Work
 	Difficulty     sunyata.Work
 	LastAdjust     time.Time
@@ -84,6 +85,12 @@ func (vc *ValidationContext) Commitment(minerAddr sunyata.Address, txns []sunyat
 	h.WriteUint64(vc.State.NumLeaves)
 	for i, root := range vc.State.Trees {
 		if vc.State.HasTreeAtHeight(i) {
+			h.WriteHash(root)
+		}
+	}
+	h.WriteUint64(vc.History.NumLeaves)
+	for i, root := range vc.History.Trees {
+		if vc.History.HasTreeAtHeight(i) {
 			h.WriteHash(root)
 		}
 	}

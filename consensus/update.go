@@ -82,6 +82,7 @@ func applyHeader(vc ValidationContext, h sunyata.BlockHeader) ValidationContext 
 	}
 	vc.PrevTimestamps[vc.numTimestamps()-1] = h.Timestamp
 	vc.Index = h.Index()
+	vc.History.AppendLeaf(vc.Index)
 	return vc
 }
 

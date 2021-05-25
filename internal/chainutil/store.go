@@ -510,6 +510,12 @@ func writeCheckpoint(w io.Writer, c consensus.Checkpoint) error {
 			writeHash(vc.State.Trees[i])
 		}
 	}
+	writeUint64(vc.History.NumLeaves)
+	for i := range vc.History.Trees {
+		if vc.History.HasTreeAtHeight(i) {
+			writeHash(vc.History.Trees[i])
+		}
+	}
 	writeHash(vc.TotalWork.NumHashes)
 	writeHash(vc.Difficulty.NumHashes)
 	writeTime(vc.LastAdjust)
@@ -600,6 +606,12 @@ func readCheckpoint(r io.Reader, c *consensus.Checkpoint) error {
 	for i := range vc.State.Trees {
 		if vc.State.HasTreeAtHeight(i) {
 			vc.State.Trees[i] = readHash()
+		}
+	}
+	vc.History.NumLeaves = readUint64()
+	for i := range vc.History.Trees {
+		if vc.History.HasTreeAtHeight(i) {
+			vc.History.Trees[i] = readHash()
 		}
 	}
 	vc.TotalWork.NumHashes = readHash()

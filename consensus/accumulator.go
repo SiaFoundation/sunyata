@@ -347,3 +347,35 @@ func (sa *StateAccumulator) validProof(txns []sunyata.Transaction, proof []sunya
 	// there should be no excess proof roots
 	return len(proof) == 0
 }
+
+func merkleHistoryLeafHash(index sunyata.ChainIndex) sunyata.Hash256 {
+	buf := make([]byte, 1+8+32)
+	buf[0] = leafHashPrefix
+	binary.LittleEndian.PutUint64(buf[1:], index.Height)
+	copy(buf[9:], index.ID[:])
+	return sunyata.HashBytes(buf)
+}
+
+// A HistoryAccumulator is a Merkle tree of sequential ChainIndexes.
+type HistoryAccumulator struct {
+	// same design as StateAccumulator
+	Trees     [64]sunyata.Hash256
+	NumLeaves uint64
+}
+
+// HasTreeAtHeight returns true if the HistoryAccumulator contains a tree root at
+// the specified height.
+func (ha *HistoryAccumulator) HasTreeAtHeight(height int) bool {
+	return ha.NumLeaves&(1<<height) != 0
+}
+
+// AppendLeaf appends an index to the accumulator.
+func (ha *HistoryAccumulator) AppendLeaf(index sunyata.ChainIndex) {
+	h := merkleHistoryLeafHash(index)
+	i := 0
+	for ; ha.HasTreeAtHeight(i); i++ {
+		h = merkleNodeHash(ha.Trees[i], h)
+	}
+	ha.Trees[i] = h
+	ha.NumLeaves++
+}
