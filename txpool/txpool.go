@@ -2,6 +2,7 @@
 package txpool
 
 import (
+	"errors"
 	"sync"
 
 	"go.sia.tech/sunyata"
@@ -16,15 +17,49 @@ type Pool struct {
 	mu   sync.Mutex
 }
 
-// AddTransaction adds a transaction to the pool. The transaction must be valid
-// as of the current chain tip and accumulator state.
+func (p *Pool) validateTransaction(txn sunyata.Transaction) error {
+	// perform standard validation checks
+	if err := p.vc.ValidateTransaction(txn); err != nil {
+		return err
+	}
+
+	// validate ephemeral outputs
+	//
+	// TODO: keep this map around instead of rebuilding it every time
+	available := make(map[sunyata.OutputID]struct{})
+	for txid, txn := range p.txns {
+		for i := range txn.Outputs {
+			oid := sunyata.OutputID{
+				TransactionID:    txid,
+				BeneficiaryIndex: uint64(i),
+			}
+			available[oid] = struct{}{}
+		}
+	}
+	for _, in := range txn.Inputs {
+		if in.Parent.LeafIndex == sunyata.EphemeralLeafIndex {
+			oid := in.Parent.ID
+			if _, ok := available[oid]; !ok {
+				return errors.New("transaction references an unknown ephemeral output")
+			}
+			delete(available, oid)
+		}
+	}
+
+	return nil
+}
+
+// AddTransaction validates a transaction and adds it to the pool. If the
+// transaction references ephemeral parent outputs, those outputs must be
+// created by other transactions already in the pool. The transaction's proofs
+// must be up-to-date.
 func (p *Pool) AddTransaction(txn sunyata.Transaction) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	txid := txn.ID()
 	if _, ok := p.txns[txid]; ok {
 		return nil // already in pool
-	} else if err := p.vc.ValidateTransaction(txn); err != nil {
+	} else if err := p.validateTransaction(txn); err != nil {
 		return err
 	}
 	p.txns[txid] = txn
