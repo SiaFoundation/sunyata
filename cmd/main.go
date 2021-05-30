@@ -373,7 +373,7 @@ func (d *node) send(amountStr string, destStr string) error {
 		return err
 	}
 	// give message to ourselves and to peers
-	if err := d.tp.AddTransaction(txn.DeepCopy()); err != nil {
+	if err := d.tp.AddTransaction(txn); err != nil {
 		return fmt.Errorf("txpool rejected transaction: %w", err)
 	}
 	d.s.Broadcast(&p2p.MsgRelayTransactionSet{Transactions: []sunyata.Transaction{txn}})

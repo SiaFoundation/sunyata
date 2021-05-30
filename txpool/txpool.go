@@ -62,7 +62,7 @@ func (p *Pool) AddTransaction(txn sunyata.Transaction) error {
 	} else if err := p.validateTransaction(txn); err != nil {
 		return err
 	}
-	p.txns[txid] = txn
+	p.txns[txid] = txn.DeepCopy()
 	return nil
 }
 
@@ -135,8 +135,16 @@ func (p *Pool) ProcessChainRevertUpdate(cru *chain.RevertUpdate) error {
 	defer p.mu.Unlock()
 
 	// put reverted txns back in the pool
-	for _, txn := range cru.Block.Transactions {
-		p.txns[txn.ID()] = txn.DeepCopy()
+	if len(cru.Block.Transactions) > 0 {
+		// need to expand individual proofs first
+		revertedTxns := make([]sunyata.Transaction, len(cru.Block.Transactions))
+		for i, txn := range cru.Block.Transactions {
+			revertedTxns[i] = txn.DeepCopy()
+		}
+		consensus.ExpandMultiproof(revertedTxns, cru.Block.AccumulatorProof)
+		for _, txn := range revertedTxns {
+			p.txns[txn.ID()] = txn
+		}
 	}
 
 	// update unconfirmed txns
