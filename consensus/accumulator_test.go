@@ -60,6 +60,16 @@ func TestAccumulator(t *testing.T) {
 			binary.LittleEndian.Uint64(b[8:]),
 		)
 	}
+	containsOutput := func(sa StateAccumulator, o sunyata.Output, spent bool) bool {
+		root := outputProofRoot(o, spent)
+		start, end := bits.TrailingZeros64(sa.NumLeaves), bits.Len64(sa.NumLeaves)
+		for i := start; i < end; i++ {
+			if sa.HasTreeAtHeight(i) && sa.Trees[i] == root {
+				return true
+			}
+		}
+		return false
+	}
 
 	b := sunyata.Block{
 		Header: sunyata.BlockHeader{
@@ -95,7 +105,7 @@ func TestAccumulator(t *testing.T) {
 		if update1.OutputWasSpent(o.LeafIndex) {
 			t.Error("update should not mark output as spent:", o)
 		}
-		if update1.Context.State.containsOutput(o, true) || !update1.Context.State.containsOutput(o, false) {
+		if containsOutput(update1.Context.State, o, true) || !containsOutput(update1.Context.State, o, false) {
 			t.Error("accumulator should contain unspent output:", o)
 		}
 	}
@@ -138,11 +148,11 @@ func TestAccumulator(t *testing.T) {
 	// the new accumulator should contain both the spent and unspent outputs
 	for _, o := range origOutputs {
 		if update2.OutputWasSpent(o.LeafIndex) {
-			if update2.Context.State.containsOutput(o, false) || !update2.Context.State.containsOutput(o, true) {
+			if containsOutput(update2.Context.State, o, false) || !containsOutput(update2.Context.State, o, true) {
 				t.Error("accumulator should contain spent output:", o)
 			}
 		} else {
-			if update2.Context.State.containsOutput(o, true) || !update2.Context.State.containsOutput(o, false) {
+			if containsOutput(update2.Context.State, o, true) || !containsOutput(update2.Context.State, o, false) {
 				t.Error("accumulator should contain unspent output:", o)
 			}
 		}
@@ -170,7 +180,7 @@ func TestAccumulator(t *testing.T) {
 		if update1.OutputWasSpent(o.LeafIndex) {
 			t.Error("update should not mark output as spent:", o)
 		}
-		if update1.Context.State.containsOutput(o, true) {
+		if containsOutput(update1.Context.State, o, true) {
 			t.Error("output should not be marked as spent:", o)
 		}
 	}
@@ -229,11 +239,11 @@ func TestAccumulator(t *testing.T) {
 	// the new accumulator should contain both the spent and unspent outputs
 	for _, o := range origOutputs {
 		if update2.OutputWasSpent(o.LeafIndex) || update3.OutputWasSpent(o.LeafIndex) {
-			if update3.Context.State.containsOutput(o, false) || !update3.Context.State.containsOutput(o, true) {
+			if containsOutput(update3.Context.State, o, false) || !containsOutput(update3.Context.State, o, true) {
 				t.Error("accumulator should contain spent output:", o)
 			}
 		} else {
-			if update3.Context.State.containsOutput(o, true) || !update3.Context.State.containsOutput(o, false) {
+			if containsOutput(update3.Context.State, o, true) || !containsOutput(update3.Context.State, o, false) {
 				t.Error("accumulator should contain unspent output:", o)
 			}
 		}
@@ -255,6 +265,16 @@ func TestAccumulatorRevert(t *testing.T) {
 			binary.LittleEndian.Uint64(b[:8]),
 			binary.LittleEndian.Uint64(b[8:]),
 		)
+	}
+	containsOutput := func(sa StateAccumulator, o sunyata.Output, spent bool) bool {
+		root := outputProofRoot(o, spent)
+		start, end := bits.TrailingZeros64(sa.NumLeaves), bits.Len64(sa.NumLeaves)
+		for i := start; i < end; i++ {
+			if sa.HasTreeAtHeight(i) && sa.Trees[i] == root {
+				return true
+			}
+		}
+		return false
 	}
 
 	b := sunyata.Block{
@@ -324,7 +344,7 @@ func TestAccumulatorRevert(t *testing.T) {
 		if update1.OutputWasSpent(o.LeafIndex) {
 			t.Error("update should not mark output as spent:", o)
 		}
-		if !update1.Context.State.containsOutput(o, false) {
+		if !containsOutput(update1.Context.State, o, false) {
 			t.Error("output should be in the accumulator, marked as unspent:", o)
 		}
 	}

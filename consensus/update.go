@@ -28,7 +28,7 @@ func (sau *StateApplyUpdate) OutputWasSpent(leafIndex uint64) bool {
 
 // UpdateOutputProof updates the Merkle proof of the supplied output to
 // incorporate the changes made to the state tree. The output's proof must be
-// up-to-date.
+// up-to-date; if it is not, UpdateOutputProof may panic.
 func (sau *StateApplyUpdate) UpdateOutputProof(o *sunyata.Output) {
 	// A state update can affect an output proof in two ways. First, if an
 	// output within the same tree as o was spent, then all of the proof hashes
@@ -168,7 +168,7 @@ func (sru *StateRevertUpdate) OutputWasRemoved(leafIndex uint64) bool {
 
 // UpdateOutputProof updates the Merkle proof of the supplied output to
 // incorporate the changes made to the state tree. The output's proof must be
-// up-to-date.
+// up-to-date; if it is not, UpdateOutputProof may panic.
 func (sru *StateRevertUpdate) UpdateOutputProof(o *sunyata.Output) {
 	// The algorithm here is, unsurprisingly, the inverse of
 	// (StateApplyUpdate).UpdateOutputProof. First we trim off any hashes that

@@ -98,8 +98,10 @@ func (sa *StateAccumulator) HasTreeAtHeight(height int) bool {
 	return sa.NumLeaves&(1<<height) != 0
 }
 
-func (sa *StateAccumulator) containsOutput(o sunyata.Output, spent bool) bool {
-	root := outputProofRoot(o, spent)
+// ContainsUnspentOutput returns true if o is a valid unspent output in the
+// accumulator.
+func (sa *StateAccumulator) ContainsUnspentOutput(o sunyata.Output) bool {
+	root := outputProofRoot(o, false)
 	start, end := bits.TrailingZeros64(sa.NumLeaves), bits.Len64(sa.NumLeaves)
 	for i := start; i < end; i++ {
 		if sa.HasTreeAtHeight(i) && sa.Trees[i] == root {

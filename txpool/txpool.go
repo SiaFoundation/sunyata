@@ -23,6 +23,13 @@ func (p *Pool) validateTransaction(txn sunyata.Transaction) error {
 		return err
 	}
 
+	// validate input proofs
+	for i := range txn.Inputs {
+		if !p.vc.State.ContainsUnspentOutput(txn.Inputs[i].Parent) {
+			return errors.New("input Merkle proof is invalid or outdated")
+		}
+	}
+
 	// validate ephemeral outputs
 	//
 	// TODO: keep this map around instead of rebuilding it every time

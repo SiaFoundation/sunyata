@@ -243,9 +243,8 @@ func (vc *ValidationContext) validSignatures(txn sunyata.Transaction) bool {
 	return true
 }
 
-// ValidateTransaction validates txn in the context of the provided chain height
-// and accumulator. Any ephemeral outputs are assumed to be valid. To validate
-// ephemeral outputs, use ValidateTransactionSet.
+// ValidateTransaction partially validates txn for inclusion in a child block.
+// It does not validate Merkle proofs or ephemeral outputs.
 func (vc *ValidationContext) ValidateTransaction(txn sunyata.Transaction) error {
 	switch {
 	case vc.containsZeroValuedOutputs(txn):
