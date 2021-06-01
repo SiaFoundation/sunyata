@@ -46,7 +46,6 @@ func (m *Miner) MineBlock() sunyata.Block {
 		// TODO: if the miner and txpool don't have the same tip, we'll
 		// construct an invalid block
 		txns := m.tp.Transactions()
-		proof := consensus.ComputeMultiproof(txns)
 
 		m.mu.Lock()
 		var weight uint64
@@ -57,6 +56,7 @@ func (m *Miner) MineBlock() sunyata.Block {
 				break
 			}
 		}
+		proof := consensus.ComputeMultiproof(txns)
 		parent := m.vc.Index
 		target := sunyata.HashRequiringWork(m.vc.Difficulty)
 		addr := m.addr
