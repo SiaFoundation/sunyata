@@ -547,7 +547,7 @@ func (m *msgBlock) encodedSize() int {
 	for i := range m.Transactions {
 		size += (*msgTransactionNoProofs)(&m.Transactions[i]).encodedSize()
 	}
-	size += 4 + len(m.AccumulatorProof)*32
+	size += consensus.MultiproofSize(m.Transactions) * 32
 	return size
 }
 
@@ -557,9 +557,9 @@ func (m *msgBlock) encodeTo(b *msgBuffer) {
 	for i := range m.Transactions {
 		(*msgTransactionNoProofs)(&m.Transactions[i]).encodeTo(b)
 	}
-	b.writePrefix(len(m.AccumulatorProof))
-	for i := range m.AccumulatorProof {
-		b.writeHash(m.AccumulatorProof[i])
+	proof := consensus.ComputeMultiproof(m.Transactions)
+	for i := range proof {
+		b.writeHash(proof[i])
 	}
 }
 
@@ -569,10 +569,12 @@ func (m *msgBlock) decodeFrom(b *msgBuffer) {
 	for i := range m.Transactions {
 		(*msgTransactionNoProofs)(&m.Transactions[i]).decodeFrom(b)
 	}
-	m.AccumulatorProof = make([]sunyata.Hash256, b.readPrefix(32))
-	for i := range m.AccumulatorProof {
-		m.AccumulatorProof[i] = b.readHash()
+	proofLen := consensus.MultiproofSize(m.Transactions)
+	proof := make([]sunyata.Hash256, proofLen)
+	for i := range proof {
+		proof[i] = b.readHash()
 	}
+	consensus.ExpandMultiproof(m.Transactions, proof)
 }
 
 type msgValidationContext consensus.ValidationContext

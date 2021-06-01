@@ -85,10 +85,9 @@ func TestScratchChain(t *testing.T) {
 				Timestamp:    b.Header.Timestamp.Add(time.Second),
 				MinerAddress: ourAddr,
 			},
-			Transactions:     txns,
-			AccumulatorProof: ComputeMultiproof(txns),
+			Transactions: txns,
 		}
-		b.Header.Commitment = sau.Context.Commitment(b.Header.MinerAddress, b.Transactions, b.AccumulatorProof)
+		b.Header.Commitment = sau.Context.Commitment(b.Header.MinerAddress, b.Transactions)
 		findBlockNonce(&b.Header, sunyata.HashRequiringWork(sau.Context.Difficulty))
 		return b
 	}
@@ -193,8 +192,7 @@ func TestDifficultyAdjustment(t *testing.T) {
 			ParentID:  b.Header.ID(),
 			Timestamp: b.Header.Timestamp.Add(time.Second),
 		}
-		b.AccumulatorProof = ComputeMultiproof(b.Transactions)
-		b.Header.Commitment = vc.Commitment(sunyata.VoidAddress, b.Transactions, b.AccumulatorProof)
+		b.Header.Commitment = vc.Commitment(sunyata.VoidAddress, b.Transactions)
 		findBlockNonce(&b.Header, sunyata.HashRequiringWork(vc.Difficulty))
 		if err := sc.AppendHeader(b.Header); err != nil {
 			t.Fatal(err)
@@ -216,7 +214,7 @@ func TestDifficultyAdjustment(t *testing.T) {
 		ParentID:  b.Header.ID(),
 		Timestamp: b.Header.Timestamp.Add(time.Second),
 	}
-	b.Header.Commitment = vc.Commitment(sunyata.VoidAddress, b.Transactions, b.AccumulatorProof)
+	b.Header.Commitment = vc.Commitment(sunyata.VoidAddress, b.Transactions)
 	for sunyata.WorkRequiredForHash(b.ID()).Cmp(currentDifficulty) >= 0 {
 		findBlockNonce(&b.Header, sunyata.HashRequiringWork(vc.Difficulty))
 	}

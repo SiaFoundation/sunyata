@@ -142,16 +142,8 @@ func (p *Pool) ProcessChainRevertUpdate(cru *chain.RevertUpdate) error {
 	defer p.mu.Unlock()
 
 	// put reverted txns back in the pool
-	if len(cru.Block.Transactions) > 0 {
-		// need to expand individual proofs first
-		revertedTxns := make([]sunyata.Transaction, len(cru.Block.Transactions))
-		for i, txn := range cru.Block.Transactions {
-			revertedTxns[i] = txn.DeepCopy()
-		}
-		consensus.ExpandMultiproof(revertedTxns, cru.Block.AccumulatorProof)
-		for _, txn := range revertedTxns {
-			p.txns[txn.ID()] = txn
-		}
+	for _, txn := range cru.Block.Transactions {
+		p.txns[txn.ID()] = txn
 	}
 
 	// update unconfirmed txns

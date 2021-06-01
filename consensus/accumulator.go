@@ -178,32 +178,43 @@ func (sa *StateAccumulator) addNewOutputs(outputs []sunyata.Output, wasSpent fun
 // parent Output are also updated, such that outputProofRoot(true) returns a
 // root within the new accumulator for all Outputs. The Outputs are grouped by
 // tree and returned for later use.
-func (sa *StateAccumulator) markInputsSpent(txns []sunyata.Transaction, proof []sunyata.Hash256) [64][]sunyata.Output {
+func (sa *StateAccumulator) markInputsSpent(txns []sunyata.Transaction) [64][]sunyata.Output {
 	// Define a helper function to recursively recompute subtree roots. As a
 	// side effect, we also fill out the individual Merkle proofs for each
 	// output.
 	var recompute func(i, j uint64, outputs []sunyata.Output) sunyata.Hash256
 	recompute = func(i, j uint64, outputs []sunyata.Output) sunyata.Hash256 {
 		height := bits.TrailingZeros64(j - i) // equivalent to log2(j-i), as j-i is always a power of two
-		if len(outputs) == 0 {
-			// no outputs in this subtree; must have a proof root
-			h := proof[0]
-			proof = proof[1:]
-			return h
-		} else if height == 0 {
+		if len(outputs) == 1 && height == 0 {
+			// base case
 			return outputLeafHash(outputs[0], true)
 		}
 		mid := (i + j) / 2
 		left, right := splitOutputs(outputs, mid)
-		leftRoot := recompute(i, mid, left)
-		rightRoot := recompute(mid, j, right)
-		for i := range right {
-			right[i].MerkleProof[height-1] = leftRoot
+		var leftRoot, rightRoot sunyata.Hash256
+		if len(left) == 0 {
+			leftRoot = right[0].MerkleProof[height-1]
+		} else {
+			leftRoot = recompute(i, mid, left)
+			for i := range right {
+				right[i].MerkleProof[height-1] = leftRoot
+			}
 		}
-		for i := range left {
-			left[i].MerkleProof[height-1] = rightRoot
+		if len(right) == 0 {
+			rightRoot = left[0].MerkleProof[height-1]
+		} else {
+			rightRoot = recompute(mid, j, right)
+			for i := range left {
+				left[i].MerkleProof[height-1] = rightRoot
+			}
 		}
 		return merkleNodeHash(leftRoot, rightRoot)
+	}
+
+	// copy txns so that we don't modify the existing proof data
+	txns = append([]sunyata.Transaction(nil), txns...)
+	for i := range txns {
+		txns[i] = txns[i].DeepCopy()
 	}
 
 	// Group the outputs by their tree (and sort them by leaf index) and use
@@ -220,10 +231,36 @@ func (sa *StateAccumulator) markInputsSpent(txns []sunyata.Transaction, proof []
 		// number of leaves in all trees smaller than this one.)
 		start := clearBits(sa.NumLeaves, height+1)
 		end := start + 1<<height
-
 		sa.Trees[height] = recompute(start, end, outputs)
 	}
 	return groups
+}
+
+// MultiproofSize computes the size of a multiproof for the given txns.
+func MultiproofSize(txns []sunyata.Transaction) int {
+	var proofSize func(i, j uint64, outputs []sunyata.Output) int
+	proofSize = func(i, j uint64, outputs []sunyata.Output) int {
+		height := bits.TrailingZeros64(j - i)
+		if len(outputs) == 0 {
+			return 1
+		} else if height == 0 {
+			return 0
+		}
+		mid := (i + j) / 2
+		left, right := splitOutputs(outputs, mid)
+		return proofSize(i, mid, left) + proofSize(mid, j, right)
+	}
+
+	size := 0
+	for height, outputs := range outputsByTree(txns) {
+		if len(outputs) == 0 {
+			continue
+		}
+		start := clearBits(outputs[0].LeafIndex, height+1)
+		end := start + 1<<height
+		size += proofSize(start, end, outputs)
+	}
+	return size
 }
 
 // ComputeMultiproof computes a single Merkle proof for all inputs in txns.
@@ -260,8 +297,9 @@ func ComputeMultiproof(txns []sunyata.Transaction) (proof []sunyata.Hash256) {
 }
 
 // ExpandMultiproof restores all of the input proofs in txns using the supplied
-// multiproof. The len of each input proof must be the correct size.
-func ExpandMultiproof(txns []sunyata.Transaction, proof []sunyata.Hash256) bool {
+// multiproof, which must be valid. The len of each input proof must be the
+// correct size.
+func ExpandMultiproof(txns []sunyata.Transaction, proof []sunyata.Hash256) {
 	var expand func(i, j uint64, outputs []sunyata.Output) sunyata.Hash256
 	expand = func(i, j uint64, outputs []sunyata.Output) sunyata.Hash256 {
 		height := bits.TrailingZeros64(j - i)
@@ -286,68 +324,14 @@ func ExpandMultiproof(txns []sunyata.Transaction, proof []sunyata.Hash256) bool 
 		return merkleNodeHash(leftRoot, rightRoot)
 	}
 
-	// helper for computing valid proof size
-	var proofSize func(i, j uint64, outputs []sunyata.Output) int
-	proofSize = func(i, j uint64, outputs []sunyata.Output) int {
-		height := bits.TrailingZeros64(j - i)
-		if len(outputs) == 0 {
-			return 1
-		} else if height == 0 {
-			return 0
-		}
-		mid := (i + j) / 2
-		left, right := splitOutputs(outputs, mid)
-		return proofSize(i, mid, left) + proofSize(mid, j, right)
-	}
-
 	for height, outputs := range outputsByTree(txns) {
 		if len(outputs) == 0 {
 			continue
 		}
 		start := clearBits(outputs[0].LeafIndex, height+1)
 		end := start + 1<<height
-		if len(proof) < proofSize(start, end, outputs) {
-			return false
-		}
 		expand(start, end, outputs)
 	}
-
-	return len(proof) == 0
-}
-
-func (sa *StateAccumulator) validProof(txns []sunyata.Transaction, proof []sunyata.Hash256) bool {
-	var root func(i, j uint64, outputs []sunyata.Output) sunyata.Hash256
-	root = func(i, j uint64, outputs []sunyata.Output) sunyata.Hash256 {
-		height := bits.TrailingZeros64(j - i)
-		if len(outputs) == 0 {
-			// we should have a proof root for all empty subtrees; if not,
-			// return a hash that is guaranteed to result in the wrong root
-			if len(proof) == 0 {
-				return sunyata.Hash256{}
-			}
-			h := proof[0]
-			proof = proof[1:]
-			return h
-		} else if height == 0 {
-			return outputLeafHash(outputs[0], false)
-		}
-		mid := (i + j) / 2
-		left, right := splitOutputs(outputs, mid)
-		return merkleNodeHash(root(i, mid, left), root(mid, j, right))
-	}
-
-	for height, outputs := range outputsByTree(txns) {
-		if len(outputs) == 0 {
-			continue
-		}
-		start := clearBits(outputs[0].LeafIndex, height+1)
-		end := start + 1<<height
-		if root(start, end, outputs) != sa.Trees[height] {
-			return false
-		}
-	}
-	// there should be no excess proof roots
-	return len(proof) == 0
 }
 
 func merkleHistoryLeafHash(index sunyata.ChainIndex) sunyata.Hash256 {

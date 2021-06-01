@@ -56,11 +56,10 @@ func (m *Miner) MineBlock() sunyata.Block {
 				break
 			}
 		}
-		proof := consensus.ComputeMultiproof(txns)
 		parent := m.vc.Index
 		target := sunyata.HashRequiringWork(m.vc.Difficulty)
 		addr := m.addr
-		commitment := m.vc.Commitment(addr, txns, proof)
+		commitment := m.vc.Commitment(addr, txns)
 		m.mu.Unlock()
 		b := sunyata.Block{
 			Header: sunyata.BlockHeader{
@@ -70,8 +69,7 @@ func (m *Miner) MineBlock() sunyata.Block {
 				Commitment:   commitment,
 				MinerAddress: addr,
 			},
-			Transactions:     txns,
-			AccumulatorProof: proof,
+			Transactions: txns,
 		}
 		rand.Read(b.Header.Nonce[:])
 

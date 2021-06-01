@@ -130,8 +130,7 @@ func TestAccumulator(t *testing.T) {
 			ParentID:     genesisID,
 			MinerAddress: randAddr(),
 		},
-		Transactions:     []sunyata.Transaction{txn},
-		AccumulatorProof: ComputeMultiproof([]sunyata.Transaction{txn}),
+		Transactions: []sunyata.Transaction{txn},
 	}
 
 	update2 := ApplyBlock(update1.Context, b)
@@ -221,8 +220,7 @@ func TestAccumulator(t *testing.T) {
 			ParentID:     b.ID(),
 			MinerAddress: randAddr(),
 		},
-		Transactions:     []sunyata.Transaction{parentTxn, childTxn},
-		AccumulatorProof: ComputeMultiproof([]sunyata.Transaction{parentTxn, childTxn}),
+		Transactions: []sunyata.Transaction{parentTxn, childTxn},
 	}
 
 	update3 := ApplyBlock(update2.Context, b)
@@ -315,8 +313,7 @@ func TestAccumulatorRevert(t *testing.T) {
 			ParentID:     genesisID,
 			MinerAddress: randAddr(),
 		},
-		Transactions:     []sunyata.Transaction{txn},
-		AccumulatorProof: ComputeMultiproof([]sunyata.Transaction{txn}),
+		Transactions: []sunyata.Transaction{txn},
 	}
 
 	update2 := ApplyBlock(update1.Context, b)
@@ -368,7 +365,7 @@ func TestMarkInputsSpent(t *testing.T) {
 		},
 	}}
 
-	acc.markInputsSpent(txns, ComputeMultiproof(txns))
+	acc.markInputsSpent(txns)
 
 	var acc2 StateAccumulator
 	addOutput := func(o sunyata.Output, spent bool) {
@@ -452,19 +449,20 @@ func TestMultiproof(t *testing.T) {
 		}
 
 		old := txns[0].DeepCopy()
-		// compute multiproof and erase individual proofs
+		// compute multiproof
 		proof := ComputeMultiproof(txns)
+		if !reflect.DeepEqual(proof, test.proof) {
+			t.Error("wrong proof generated")
+		}
 		for _, txn := range txns {
 			for i := range txn.Inputs {
 				txn.Inputs[i].Parent.MerkleProof = make([]sunyata.Hash256, len(txn.Inputs[i].Parent.MerkleProof))
 			}
 		}
-		if !ExpandMultiproof(txns, proof) {
-			t.Error("invalid multiproof")
-		} else if !reflect.DeepEqual(txns[0], old) {
-			t.Fatal(txns, old)
-		} else if !reflect.DeepEqual(proof, test.proof) {
-			t.Error("wrong proof generated")
+		// expand multiproof and check roundtrip
+		ExpandMultiproof(txns, proof)
+		if !reflect.DeepEqual(txns[0], old) {
+			t.Fatal("\n", txns[0], "\n", old)
 		}
 	}
 }
@@ -511,7 +509,6 @@ func BenchmarkMarkInputs(b *testing.B) {
 	for i, j := range indices {
 		txns[0].Inputs[i].Parent = outputs[j]
 	}
-	proof := ComputeMultiproof(txns)
 
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -524,6 +521,6 @@ func BenchmarkMarkInputs(b *testing.B) {
 		}
 		b.StartTimer()
 
-		acc2.markInputsSpent(txns, proof)
+		acc2.markInputsSpent(txns)
 	}
 }

@@ -92,7 +92,7 @@ func applyHeader(vc ValidationContext, h sunyata.BlockHeader) ValidationContext 
 func ApplyBlock(vc ValidationContext, b sunyata.Block) (sau StateApplyUpdate) {
 	sau.Context = applyHeader(vc, b.Header)
 
-	sau.spentOutputs = sau.Context.State.markInputsSpent(b.Transactions, b.AccumulatorProof)
+	sau.spentOutputs = sau.Context.State.markInputsSpent(b.Transactions)
 
 	// create block reward output
 	numOutputs := 1

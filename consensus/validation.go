@@ -71,7 +71,7 @@ func (vc *ValidationContext) BlockWeight(txns []sunyata.Transaction) uint64 {
 }
 
 // Commitment computes the commitment hash for a child block.
-func (vc *ValidationContext) Commitment(minerAddr sunyata.Address, txns []sunyata.Transaction, proof []sunyata.Hash256) sunyata.Hash256 {
+func (vc *ValidationContext) Commitment(minerAddr sunyata.Address, txns []sunyata.Transaction) sunyata.Hash256 {
 	h := hasherPool.Get().(*sunyata.Hasher)
 	defer hasherPool.Put(h)
 	h.Reset()
@@ -110,6 +110,9 @@ func (vc *ValidationContext) Commitment(minerAddr sunyata.Address, txns []sunyat
 			h.WriteCurrency(in.Parent.Value)
 			h.WriteHash(in.Parent.Address)
 			h.WriteUint64(in.Parent.Timelock)
+			for _, p := range in.Parent.MerkleProof {
+				h.WriteHash(p)
+			}
 			h.WriteUint64(in.Parent.LeafIndex)
 			h.WriteHash(in.PublicKey)
 			h.Write(in.Signature[:])
@@ -123,16 +126,9 @@ func (vc *ValidationContext) Commitment(minerAddr sunyata.Address, txns []sunyat
 	txnsHash := h.Sum()
 
 	h.Reset()
-	for _, p := range proof {
-		h.WriteHash(p)
-	}
-	proofHash := h.Sum()
-
-	h.Reset()
 	h.WriteHash(ctxHash)
 	h.WriteHash(minerAddr)
 	h.WriteHash(txnsHash)
-	h.WriteHash(proofHash)
 	return h.Sum()
 }
 
@@ -233,6 +229,15 @@ func (vc *ValidationContext) outputsEqualInputs(txn sunyata.Transaction) bool {
 	return !overflowed && inputSum == outputSum
 }
 
+func (vc *ValidationContext) validInputMerkleProofs(txn sunyata.Transaction) bool {
+	for _, in := range txn.Inputs {
+		if in.Parent.LeafIndex != sunyata.EphemeralLeafIndex && !vc.State.ContainsUnspentOutput(in.Parent) {
+			return false
+		}
+	}
+	return true
+}
+
 func (vc *ValidationContext) validSignatures(txn sunyata.Transaction) bool {
 	sigHash := vc.SigHash(txn)
 	for _, in := range txn.Inputs {
@@ -244,7 +249,7 @@ func (vc *ValidationContext) validSignatures(txn sunyata.Transaction) bool {
 }
 
 // ValidateTransaction partially validates txn for inclusion in a child block.
-// It does not validate Merkle proofs or ephemeral outputs.
+// It does not validate ephemeral outputs.
 func (vc *ValidationContext) ValidateTransaction(txn sunyata.Transaction) error {
 	switch {
 	case vc.containsZeroValuedOutputs(txn):
@@ -255,6 +260,8 @@ func (vc *ValidationContext) ValidateTransaction(txn sunyata.Transaction) error 
 		return errors.New("outputs of transaction do not equal its inputs")
 	case !vc.validPubkeys(txn):
 		return errors.New("transaction contains unlock conditions that do not hash to the correct address")
+	case !vc.validInputMerkleProofs(txn):
+		return errors.New("transaction contains an invalid input proof")
 	case !vc.validSignatures(txn):
 		return errors.New("transaction contains an invalid signature")
 	}
@@ -322,10 +329,8 @@ func (vc *ValidationContext) ValidateBlock(b sunyata.Block) error {
 	h := b.Header
 	if err := vc.validateHeader(h); err != nil {
 		return err
-	} else if vc.Commitment(h.MinerAddress, b.Transactions, b.AccumulatorProof) != h.Commitment {
+	} else if vc.Commitment(h.MinerAddress, b.Transactions) != h.Commitment {
 		return errors.New("commitment hash does not match header")
-	} else if !vc.State.validProof(b.Transactions, b.AccumulatorProof) {
-		return errors.New("invalid accumulator proof")
 	} else if err := vc.ValidateTransactionSet(b.Transactions); err != nil {
 		return err
 	}
