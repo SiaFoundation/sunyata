@@ -360,30 +360,18 @@ type MsgCheckpoint struct {
 }
 
 func (m *MsgCheckpoint) encodedSize() int {
-	n := msgBlockHeaderSize
-	n += 4
-	for i := range m.Block.Transactions {
-		n += (*msgTransaction)(&m.Block.Transactions[i]).encodedSize()
-	}
+	n := (*msgBlock)(&m.Block).encodedSize()
 	n += (*msgValidationContext)(&m.ParentContext).encodedSize()
 	return n
 }
 
 func (m *MsgCheckpoint) encodeTo(b *msgBuffer) {
-	(*msgBlockHeader)(&m.Block.Header).encodeTo(b)
-	b.writePrefix(len(m.Block.Transactions))
-	for i := range m.Block.Transactions {
-		(*msgTransaction)(&m.Block.Transactions[i]).encodeTo(b)
-	}
+	(*msgBlock)(&m.Block).encodeTo(b)
 	(*msgValidationContext)(&m.ParentContext).encodeTo(b)
 }
 
 func (m *MsgCheckpoint) decodeFrom(b *msgBuffer) {
-	(*msgBlockHeader)(&m.Block.Header).decodeFrom(b)
-	m.Block.Transactions = make([]sunyata.Transaction, b.readPrefix(minTxnSize))
-	for i := range m.Block.Transactions {
-		(*msgTransaction)(&m.Block.Transactions[i]).decodeFrom(b)
-	}
+	(*msgBlock)(&m.Block).decodeFrom(b)
 	(*msgValidationContext)(&m.ParentContext).decodeFrom(b)
 }
 
