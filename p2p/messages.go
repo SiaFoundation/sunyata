@@ -309,6 +309,7 @@ func (m *MsgRelayBlock) decodeFrom(b *msgBuffer) {
 }
 
 // MsgRelayTransactionSet relays a transaction set for inclusion in the txpool.
+// All proofs in the set must be up-to-date as of the same block.
 type MsgRelayTransactionSet struct {
 	Transactions []sunyata.Transaction
 }
@@ -318,6 +319,7 @@ func (m *MsgRelayTransactionSet) encodedSize() int {
 	for i := range m.Transactions {
 		size += (*msgTransaction)(&m.Transactions[i]).encodedSize()
 	}
+	size += consensus.MultiproofSize(m.Transactions) * 32
 	return size
 }
 
@@ -326,6 +328,10 @@ func (m *MsgRelayTransactionSet) encodeTo(b *msgBuffer) {
 	for i := range m.Transactions {
 		(*msgTransaction)(&m.Transactions[i]).encodeTo(b)
 	}
+	proof := consensus.ComputeMultiproof(m.Transactions)
+	for i := range proof {
+		b.writeHash(proof[i])
+	}
 }
 
 func (m *MsgRelayTransactionSet) decodeFrom(b *msgBuffer) {
@@ -333,6 +339,12 @@ func (m *MsgRelayTransactionSet) decodeFrom(b *msgBuffer) {
 	for i := range m.Transactions {
 		(*msgTransaction)(&m.Transactions[i]).decodeFrom(b)
 	}
+	proofLen := consensus.MultiproofSize(m.Transactions)
+	proof := make([]sunyata.Hash256, proofLen)
+	for i := range proof {
+		proof[i] = b.readHash()
+	}
+	consensus.ExpandMultiproof(m.Transactions, proof)
 }
 
 // MsgGetCheckpoint requests a Block and its ValidationContext.
@@ -413,20 +425,14 @@ func (m *msgBlockHeader) decodeFrom(b *msgBuffer) {
 	m.Commitment = b.readHash()
 }
 
-type msgTransaction sunyata.Transaction
+type msgTransaction sunyata.Transaction // proofs not included; must use multiproofs
 
 const minTxnSize = 4 + 4 + 16 // for readPrefix
 
 func (m *msgTransaction) encodedSize() int {
-	size := 4
-	for j := range m.Inputs {
-		proofSize := 4 + len(m.Inputs[j].Parent.MerkleProof)*32
-		size += 32 + 8 + 16 + 32 + 8 + proofSize + 8 // output
-		size += 32                                   // pubkey
-		size += 64                                   // signature
-	}
-	size += 4 + len(m.Outputs)*(16+32) // outputs
-	size += 16                         // miner fee
+	size := 4 + len(m.Inputs)*(32+8+16+32+8+4+8+32+64) // inputs
+	size += 4 + len(m.Outputs)*(16+32)                 // outputs
+	size += 16                                         // miner fee
 	return size
 }
 
@@ -440,9 +446,6 @@ func (m *msgTransaction) encodeTo(b *msgBuffer) {
 		b.writeHash(in.Parent.Address)
 		b.writeUint64(in.Parent.Timelock)
 		b.writePrefix(len(in.Parent.MerkleProof))
-		for k := range in.Parent.MerkleProof {
-			b.writeHash(in.Parent.MerkleProof[k])
-		}
 		b.writeUint64(in.Parent.LeafIndex)
 		b.write(in.PublicKey[:])
 		b.write(in.Signature[:])
@@ -457,65 +460,6 @@ func (m *msgTransaction) encodeTo(b *msgBuffer) {
 }
 
 func (m *msgTransaction) decodeFrom(b *msgBuffer) {
-	const minInputSize = 32 + 8 + 16 + 32 + 8 + 4 + 8 + 32 + 64
-	m.Inputs = make([]sunyata.Input, b.readPrefix(minInputSize))
-	for j := range m.Inputs {
-		in := &m.Inputs[j]
-		in.Parent.ID.TransactionID = b.readHash()
-		in.Parent.ID.BeneficiaryIndex = b.readUint64()
-		in.Parent.Value = b.readCurrency()
-		in.Parent.Address = b.readHash()
-		in.Parent.Timelock = b.readUint64()
-		in.Parent.MerkleProof = make([]sunyata.Hash256, b.readPrefix(32))
-		for i := range in.Parent.MerkleProof {
-			in.Parent.MerkleProof[i] = b.readHash()
-		}
-		in.Parent.LeafIndex = b.readUint64()
-		b.read(in.PublicKey[:])
-		b.read(in.Signature[:])
-	}
-	m.Outputs = make([]sunyata.Beneficiary, b.readPrefix(48))
-	for j := range m.Outputs {
-		out := &m.Outputs[j]
-		out.Value = b.readCurrency()
-		out.Address = b.readHash()
-	}
-	m.MinerFee = b.readCurrency()
-}
-
-type msgTransactionNoProofs sunyata.Transaction
-
-func (m *msgTransactionNoProofs) encodedSize() int {
-	size := 4 + len(m.Inputs)*(32+8+16+32+8+4+8+32+64) // inputs
-	size += 4 + len(m.Outputs)*(16+32)                 // outputs
-	size += 16                                         // miner fee
-	return size
-}
-
-func (m *msgTransactionNoProofs) encodeTo(b *msgBuffer) {
-	b.writePrefix(len(m.Inputs))
-	for i := range m.Inputs {
-		in := &m.Inputs[i]
-		b.writeHash(in.Parent.ID.TransactionID)
-		b.writeUint64(in.Parent.ID.BeneficiaryIndex)
-		b.writeCurrency(in.Parent.Value)
-		b.writeHash(in.Parent.Address)
-		b.writeUint64(in.Parent.Timelock)
-		b.writePrefix(len(in.Parent.MerkleProof))
-		b.writeUint64(in.Parent.LeafIndex)
-		b.write(in.PublicKey[:])
-		b.write(in.Signature[:])
-	}
-	b.writePrefix(len(m.Outputs))
-	for j := range m.Outputs {
-		out := &m.Outputs[j]
-		b.writeCurrency(out.Value)
-		b.writeHash(out.Address)
-	}
-	b.writeCurrency(m.MinerFee)
-}
-
-func (m *msgTransactionNoProofs) decodeFrom(b *msgBuffer) {
 	const minInputSize = 32 + 8 + 16 + 32 + 8 + 4 + 8 + 32 + 64
 	m.Inputs = make([]sunyata.Input, b.readPrefix(minInputSize))
 	for j := range m.Inputs {
@@ -545,7 +489,7 @@ func (m *msgBlock) encodedSize() int {
 	size := msgBlockHeaderSize
 	size += 4
 	for i := range m.Transactions {
-		size += (*msgTransactionNoProofs)(&m.Transactions[i]).encodedSize()
+		size += (*msgTransaction)(&m.Transactions[i]).encodedSize()
 	}
 	size += consensus.MultiproofSize(m.Transactions) * 32
 	return size
@@ -555,7 +499,7 @@ func (m *msgBlock) encodeTo(b *msgBuffer) {
 	(*msgBlockHeader)(&m.Header).encodeTo(b)
 	b.writePrefix(len(m.Transactions))
 	for i := range m.Transactions {
-		(*msgTransactionNoProofs)(&m.Transactions[i]).encodeTo(b)
+		(*msgTransaction)(&m.Transactions[i]).encodeTo(b)
 	}
 	proof := consensus.ComputeMultiproof(m.Transactions)
 	for i := range proof {
@@ -567,7 +511,7 @@ func (m *msgBlock) decodeFrom(b *msgBuffer) {
 	(*msgBlockHeader)(&m.Header).decodeFrom(b)
 	m.Transactions = make([]sunyata.Transaction, b.readPrefix(minTxnSize))
 	for i := range m.Transactions {
-		(*msgTransactionNoProofs)(&m.Transactions[i]).decodeFrom(b)
+		(*msgTransaction)(&m.Transactions[i]).decodeFrom(b)
 	}
 	proofLen := consensus.MultiproofSize(m.Transactions)
 	proof := make([]sunyata.Hash256, proofLen)
