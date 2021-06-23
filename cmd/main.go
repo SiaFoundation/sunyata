@@ -275,7 +275,7 @@ func newNode(addr, dir, seedStr string, c consensus.Checkpoint) (*node, error) {
 	if err := os.MkdirAll(walletDir, 0700); err != nil {
 		return nil, err
 	}
-	walletStore, walletTip, err := walletutil.NewJSONStore(walletDir, c.Context)
+	walletStore, walletTip, err := walletutil.NewJSONStore(walletDir, tip.Context)
 	if err != nil {
 		return nil, err
 	}
