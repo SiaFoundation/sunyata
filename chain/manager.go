@@ -3,6 +3,7 @@ package chain
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -99,13 +100,22 @@ func (m *Manager) ValidationContext(index sunyata.ChainIndex) (consensus.Validat
 func (m *Manager) History() ([]sunyata.ChainIndex, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	// determine base of store
+	//
+	// TODO: store should probably just expose this
+	baseHeight := uint64(sort.Search(int(m.vc.Index.Height), func(height int) bool {
+		_, err := m.store.BestIndex(uint64(height))
+		return err == nil
+	}))
+
 	histHeight := func(i int) uint64 {
 		offset := uint64(i)
 		if offset >= 10 {
 			offset = 7 + 1<<(i-8) // strange, but it works
 		}
-		if offset > m.vc.Index.Height {
-			offset = m.vc.Index.Height
+		if offset > m.vc.Index.Height-baseHeight {
+			offset = m.vc.Index.Height - baseHeight
 		}
 		return m.vc.Index.Height - offset
 	}
@@ -113,10 +123,10 @@ func (m *Manager) History() ([]sunyata.ChainIndex, error) {
 	for {
 		index, err := m.store.BestIndex(histHeight(len(history)))
 		if err != nil {
-			break // stop early; best we can do
+			return nil, err
 		}
 		history = append(history, index)
-		if index.Height == 0 {
+		if index.Height == baseHeight {
 			break
 		}
 	}
