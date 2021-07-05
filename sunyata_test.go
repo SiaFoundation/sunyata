@@ -30,30 +30,6 @@ func TestWork(t *testing.T) {
 	}
 }
 
-func TestWorkAdjust(t *testing.T) {
-	w := Work{[32]byte{31: 100}}
-	twice := AdjustDifficulty(w, BlockInterval*DifficultyAdjustmentInterval/2)
-	if twice.String() != "200" {
-		t.Errorf("expected 200, got %v", twice.String())
-	}
-	half := AdjustDifficulty(w, BlockInterval*DifficultyAdjustmentInterval*2)
-	if half.String() != "50" {
-		t.Errorf("expected 50, got %v", half.String())
-	}
-	third := AdjustDifficulty(w, BlockInterval*DifficultyAdjustmentInterval*3)
-	if third.String() != "33" {
-		t.Errorf("expected 33, got %v", third.String())
-	}
-	max := AdjustDifficulty(w, BlockInterval*DifficultyAdjustmentInterval/100)
-	if max.String() != "400" {
-		t.Errorf("expected 400, got %v", max.String())
-	}
-	min := AdjustDifficulty(w, BlockInterval*DifficultyAdjustmentInterval*100)
-	if min.String() != "25" {
-		t.Errorf("expected 25, got %v", min.String())
-	}
-}
-
 func TestCurrencyMarshalling(t *testing.T) {
 	tests := []struct {
 		value, str string

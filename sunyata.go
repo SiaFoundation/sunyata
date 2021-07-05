@@ -283,37 +283,6 @@ func HashRequiringWork(w Work) BlockID {
 	return id
 }
 
-// BlockInterval is the expected wall clock time between consecutive blocks.
-const BlockInterval = 10 * time.Minute
-
-// DifficultyAdjustmentInterval is the number of blocks between adjustments to
-// the block mining target.
-const DifficultyAdjustmentInterval = 2016
-
-// AdjustDifficulty computes the amount of Work required for the next difficulty
-// adjustment interval, given the amount of Work performed in the previous
-// interval and the duration of that interval.
-func AdjustDifficulty(w Work, interval time.Duration) Work {
-	if interval.Round(time.Second) != interval {
-		// developer error; interval should be the difference between two Unix
-		// timestamps
-		panic("interval not rounded to nearest second")
-	}
-	const maxInterval = BlockInterval * DifficultyAdjustmentInterval * 4
-	const minInterval = BlockInterval * DifficultyAdjustmentInterval / 4
-	if interval > maxInterval {
-		interval = maxInterval
-	} else if interval < minInterval {
-		interval = minInterval
-	}
-	workInt := new(big.Int).SetBytes(w.NumHashes[:])
-	workInt.Mul(workInt, big.NewInt(int64(BlockInterval*DifficultyAdjustmentInterval)))
-	workInt.Div(workInt, big.NewInt(int64(interval)))
-	quo := workInt.Bytes()
-	copy(w.NumHashes[32-len(quo):], quo)
-	return w
-}
-
 // A Hasher hashes data using sunyata's hash function.
 type Hasher struct {
 	h   hash.Hash

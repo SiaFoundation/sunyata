@@ -178,7 +178,7 @@ func TestScratchChain(t *testing.T) {
 	}
 }
 
-func TestDifficultyAdjustment(t *testing.T) {
+func TestScratchChainDifficultyAdjustment(t *testing.T) {
 	var b sunyata.Block
 	b.Header.Timestamp = time.Unix(734600000, 0)
 	initialDifficulty := sunyata.Work{NumHashes: [32]byte{31: 4}}
@@ -186,7 +186,7 @@ func TestDifficultyAdjustment(t *testing.T) {
 
 	// mine enough blocks to trigger adjustment
 	sc := NewScratchChain(vc)
-	for i := 0; i < sunyata.DifficultyAdjustmentInterval; i++ {
+	for i := 0; i < DifficultyAdjustmentInterval; i++ {
 		b.Header = sunyata.BlockHeader{
 			Height:    b.Header.Height + 1,
 			ParentID:  b.Header.ID(),
@@ -231,4 +231,28 @@ func TestDifficultyAdjustment(t *testing.T) {
 		t.Fatal(err)
 	}
 	vc = ApplyBlock(vc, b).Context
+}
+
+func TestAdjustDifficulty(t *testing.T) {
+	w := sunyata.Work{NumHashes: [32]byte{31: 100}}
+	twice := adjustDifficulty(w, BlockInterval*DifficultyAdjustmentInterval/2)
+	if twice.String() != "200" {
+		t.Errorf("expected 200, got %v", twice.String())
+	}
+	half := adjustDifficulty(w, BlockInterval*DifficultyAdjustmentInterval*2)
+	if half.String() != "50" {
+		t.Errorf("expected 50, got %v", half.String())
+	}
+	third := adjustDifficulty(w, BlockInterval*DifficultyAdjustmentInterval*3)
+	if third.String() != "33" {
+		t.Errorf("expected 33, got %v", third.String())
+	}
+	max := adjustDifficulty(w, BlockInterval*DifficultyAdjustmentInterval/100)
+	if max.String() != "400" {
+		t.Errorf("expected 400, got %v", max.String())
+	}
+	min := adjustDifficulty(w, BlockInterval*DifficultyAdjustmentInterval*100)
+	if min.String() != "25" {
+		t.Errorf("expected 25, got %v", min.String())
+	}
 }

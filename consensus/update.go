@@ -1,6 +1,9 @@
 package consensus
 
 import (
+	"math/big"
+	"time"
+
 	"go.sia.tech/sunyata"
 )
 
@@ -70,10 +73,38 @@ func (sau *StateApplyUpdate) UpdateOutputProof(o *sunyata.Output) {
 	o.MerkleProof = append(o.MerkleProof, sau.treeGrowth[len(o.MerkleProof)]...)
 }
 
+// BlockInterval is the expected wall clock time between consecutive blocks.
+const BlockInterval = 10 * time.Minute
+
+// DifficultyAdjustmentInterval is the number of blocks between adjustments to
+// the block mining target.
+const DifficultyAdjustmentInterval = 2016
+
+func adjustDifficulty(w sunyata.Work, interval time.Duration) sunyata.Work {
+	if interval.Round(time.Second) != interval {
+		// developer error; interval should be the difference between two Unix
+		// timestamps
+		panic("interval not rounded to nearest second")
+	}
+	const maxInterval = BlockInterval * DifficultyAdjustmentInterval * 4
+	const minInterval = BlockInterval * DifficultyAdjustmentInterval / 4
+	if interval > maxInterval {
+		interval = maxInterval
+	} else if interval < minInterval {
+		interval = minInterval
+	}
+	workInt := new(big.Int).SetBytes(w.NumHashes[:])
+	workInt.Mul(workInt, big.NewInt(int64(BlockInterval*DifficultyAdjustmentInterval)))
+	workInt.Div(workInt, big.NewInt(int64(interval)))
+	quo := workInt.Bytes()
+	copy(w.NumHashes[32-len(quo):], quo)
+	return w
+}
+
 func applyHeader(vc ValidationContext, h sunyata.BlockHeader) ValidationContext {
 	blockWork := sunyata.WorkRequiredForHash(h.ID())
-	if h.Height > 0 && h.Height%sunyata.DifficultyAdjustmentInterval == 0 {
-		vc.Difficulty = sunyata.AdjustDifficulty(vc.Difficulty, h.Timestamp.Sub(vc.LastAdjust))
+	if h.Height > 0 && h.Height%DifficultyAdjustmentInterval == 0 {
+		vc.Difficulty = adjustDifficulty(vc.Difficulty, h.Timestamp.Sub(vc.LastAdjust))
 		vc.LastAdjust = h.Timestamp
 	}
 	vc.TotalWork = vc.TotalWork.Add(blockWork)

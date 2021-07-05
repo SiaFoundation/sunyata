@@ -219,7 +219,6 @@ func (s *Syncer) processMsgRelayBlock(p *Peer, msg *MsgRelayBlock) {
 	}
 
 	s.relay(p, msg)
-	return
 }
 
 func (s *Syncer) processMsgRelayTransactionSet(p *Peer, msg *MsgRelayTransactionSet) {
