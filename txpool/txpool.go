@@ -12,22 +12,27 @@ import (
 
 // A Pool holds transactions that may be included in future blocks.
 type Pool struct {
-	txns map[sunyata.TransactionID]sunyata.Transaction
-	vc   consensus.ValidationContext
-	mu   sync.Mutex
+	txns       map[sunyata.TransactionID]sunyata.Transaction
+	vc         consensus.ValidationContext
+	prevVC     consensus.ValidationContext
+	prevUpdate consensus.StateApplyUpdate
+	mu         sync.Mutex
 }
 
 func (p *Pool) validateTransaction(txn sunyata.Transaction) error {
-	// perform standard validation checks
-	if err := p.vc.ValidateTransaction(txn); err != nil {
-		return err
-	}
-
-	// validate input proofs
-	for i := range txn.Inputs {
-		if !p.vc.State.ContainsUnspentOutput(txn.Inputs[i].Parent) {
-			return errors.New("input Merkle proof is invalid or outdated")
+	// Perform standard validation checks, with added flexibility: if the
+	// transaction merely has outdated proofs, update them and attempt to
+	// validate again.
+	err := p.vc.ValidateTransaction(txn)
+	if err == consensus.ErrInvalidInputProof && p.prevVC.ValidateTransaction(txn) == nil {
+		txn = txn.DeepCopy() // don't modify input
+		for i := range txn.Inputs {
+			p.prevUpdate.UpdateOutputProof(&txn.Inputs[i].Parent)
 		}
+		err = p.vc.ValidateTransaction(txn)
+	}
+	if err != nil {
+		return err
 	}
 
 	// validate ephemeral outputs
@@ -131,8 +136,9 @@ outer:
 		p.txns[id] = txn
 	}
 
-	// update validation context
-	p.vc = cau.Context
+	// update the current and previous validation contexts
+	p.prevVC, p.vc = p.vc, cau.Context
+	p.prevUpdate = cau.StateApplyUpdate
 	return nil
 }
 
@@ -178,7 +184,8 @@ outer:
 // New creates a new transaction pool.
 func New(vc consensus.ValidationContext) *Pool {
 	return &Pool{
-		txns: make(map[sunyata.TransactionID]sunyata.Transaction),
-		vc:   vc,
+		txns:   make(map[sunyata.TransactionID]sunyata.Transaction),
+		vc:     vc,
+		prevVC: vc,
 	}
 }
