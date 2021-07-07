@@ -12,15 +12,29 @@ import (
 
 // A Pool holds transactions that may be included in future blocks.
 type Pool struct {
-	txns map[sunyata.TransactionID]sunyata.Transaction
-	vc   consensus.ValidationContext
-	mu   sync.Mutex
+	txns       map[sunyata.TransactionID]sunyata.Transaction
+	lastUpdate consensus.StateApplyUpdate
+	prevVC     consensus.ValidationContext
+	vc         consensus.ValidationContext
+	mu         sync.Mutex
 }
 
 func (p *Pool) validateTransaction(txn sunyata.Transaction) error {
 	// perform standard validation checks
 	if err := p.vc.ValidateTransaction(txn); err != nil {
-		return err
+		// If the transaction is valid against the previous validation context
+		// update the proofs and revalidate.
+		if prevErr := p.prevVC.ValidateTransaction(txn); prevErr != nil {
+			return err
+		}
+
+		for i := range txn.Inputs {
+			p.lastUpdate.UpdateOutputProof(&txn.Inputs[i].Parent)
+		}
+
+		if err := p.vc.ValidateTransaction(txn); err != nil {
+			return err
+		}
 	}
 
 	// validate input proofs
@@ -131,8 +145,9 @@ outer:
 		p.txns[id] = txn
 	}
 
-	// update validation context
-	p.vc = cau.Context
+	// update the previous and current validation contexts.
+	p.prevVC, p.vc = p.vc, cau.Context
+	p.lastUpdate = cau.StateApplyUpdate
 	return nil
 }
 
