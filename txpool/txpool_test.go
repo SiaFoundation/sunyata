@@ -2,67 +2,32 @@ package txpool_test
 
 import (
 	"testing"
-	"time"
 
 	"go.sia.tech/sunyata"
 	"go.sia.tech/sunyata/chain"
-	"go.sia.tech/sunyata/consensus"
 	"go.sia.tech/sunyata/internal/chainutil"
 	"go.sia.tech/sunyata/internal/walletutil"
-	"go.sia.tech/sunyata/miner"
 	"go.sia.tech/sunyata/txpool"
 	"go.sia.tech/sunyata/wallet"
 )
 
 // TestTPoolFlexibility tests that the txpool can accept transactions that are
 // valid for the previous validation context
-func TestTPoolFlexibility(t *testing.T) {
+func TestPoolFlexibility(t *testing.T) {
+	sim := chainutil.NewChainSim()
+
+	cm := chain.NewManager(chainutil.NewEphemeralStore(sim.Genesis), sim.Context)
 	walletStore := walletutil.NewEphemeralStore()
 	wallet := wallet.NewHotWallet(walletStore, wallet.NewSeed())
-	genesisBlock := sunyata.Block{
-		Header: sunyata.BlockHeader{
-			Timestamp: time.Now().Add(-1 * time.Hour),
-		},
-		Transactions: []sunyata.Transaction{
-			{
-				Outputs: []sunyata.Beneficiary{
-					{
-						Address: wallet.NextAddress(),
-						Value:   sunyata.BaseUnitsPerCoin.Mul64(100),
-					},
-				},
-			},
-		},
-	}
-	genesis := consensus.Checkpoint{
-		Block:   genesisBlock,
-		Context: consensus.GenesisUpdate(genesisBlock, sunyata.Work{NumHashes: [32]byte{31: 1}}).Context,
-	}
-	chainStore := chainutil.NewEphemeralStore(genesis)
-	cm := chain.NewManager(chainStore, genesis.Context)
-	tp := txpool.New(genesis.Context)
+	tp := txpool.New(sim.Genesis.Context)
 
-	if err := cm.AddSubscriber(walletStore, genesis.Context.Index); err != nil {
+	if err := cm.AddSubscriber(walletStore, cm.Tip()); err != nil {
 		t.Fatalf("failed to subscribe wallet: %s", err)
 	}
-
-	m := miner.New(genesis.Context, wallet.NextAddress(), tp, miner.CPU)
 	if err := cm.AddSubscriber(tp, cm.Tip()); err != nil {
 		t.Fatalf("failed to subscribe txpool: %s", err)
 	}
-	if err := cm.AddSubscriber(m, cm.Tip()); err != nil {
-		t.Fatalf("failed to subscribe miner: %s", err)
-	}
 
-	// Helper function to miner blocks using our miner.
-	mineBlock := func(n int) {
-		for i := 0; i < n; i++ {
-			b := m.MineBlock()
-			if err := cm.AddTipBlock(b); err != nil {
-				t.Fatalf("failed to mine block: %s", err)
-			}
-		}
-	}
 	// Helper function to fund and sign a transaction
 	send := func(recip sunyata.Address, amount sunyata.Currency) sunyata.Transaction {
 		txn := sunyata.Transaction{
@@ -87,7 +52,18 @@ func TestTPoolFlexibility(t *testing.T) {
 	}
 
 	// Mine enough blocks to have multiple spendable outputs.
-	mineBlock(200)
+	addr := wallet.NextAddress()
+	cm.AddTipBlock(sim.MineBlockWithBeneficiaries(sunyata.Beneficiary{
+		Value:   sunyata.BaseUnitsPerCoin.Mul64(50),
+		Address: addr,
+	}, sunyata.Beneficiary{
+		Value:   sunyata.BaseUnitsPerCoin.Mul64(50),
+		Address: addr,
+	}, sunyata.Beneficiary{
+		Value:   sunyata.BaseUnitsPerCoin.Mul64(50),
+		Address: addr,
+	}))
+	cm.AddTipBlock(sim.MineBlock())
 
 	// Create and sign three transactions. One will be spent in the current block
 	// to invalidate the merkle proofs of the other transaction. The other will
@@ -96,9 +72,9 @@ func TestTPoolFlexibility(t *testing.T) {
 	// verify that it can no longer be spent since the validation context will
 	// be out of scope.
 	amount := sunyata.BaseUnitsPerCoin.Mul64(10)
-	spent := send(wallet.NextAddress(), amount)
-	held := send(wallet.NextAddress(), amount)
-	held2 := send(wallet.NextAddress(), amount)
+	spent := send(addr, amount)
+	held := send(addr, amount)
+	held2 := send(addr, amount)
 
 	if err := tp.AddTransaction(spent); err != nil {
 		t.Fatalf("failed to add spent transaction: %s", err)
@@ -106,14 +82,14 @@ func TestTPoolFlexibility(t *testing.T) {
 
 	// Mine a block to invalidate the held transaction's proofs, then add the
 	// transaction.
-	mineBlock(1)
+	cm.AddTipBlock(sim.MineBlock())
 	if err := tp.AddTransaction(held); err != nil {
 		t.Fatalf("failed to add held transaction: %s", err)
 	}
 
 	// Mine another block to update the txpool's last applied update, then
 	// attempt to add the second held transaction.
-	mineBlock(1)
+	cm.AddTipBlock(sim.MineBlock())
 	if err := tp.AddTransaction(held2); err == nil {
 		t.Fatalf("expected transaction to contain invalid proofs")
 	}
