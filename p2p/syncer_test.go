@@ -14,16 +14,11 @@ import (
 func testPeerResponse(t testing.TB, s *Syncer, m Message) Message {
 	t.Helper()
 	p := &Peer{cond: sync.Cond{L: new(sync.Mutex)}}
-	s.handleMessage(p, m)
+	resp := s.handleRequest(p, m)
 	if s.err != nil {
 		t.Fatal(s.err)
-	} else if len(p.out) > 1 {
-		t.Fatal("expected at most one message in outbox, got", len(p.out))
 	}
-	if len(p.out) == 0 {
-		return nil
-	}
-	return p.out[0]
+	return resp
 }
 
 func TestSyncer(t *testing.T) {
@@ -257,8 +252,8 @@ func TestMsgRelayBlock(t *testing.T) {
 	// mine a block and relay it; should be accepted and relayed
 	sim.MineBlocks(1)
 	b := sim.Chain[0]
-	n.s.handleMessage(new(Peer), &MsgRelayBlock{b})
-	if len(relay.out) == 0 {
+	resp := n.s.handleRequest(new(Peer), &MsgRelayBlock{b})
+	if resp == nil {
 		t.Fatal("expected relay")
 	}
 
