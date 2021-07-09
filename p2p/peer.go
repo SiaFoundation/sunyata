@@ -124,9 +124,9 @@ func (p *Peer) handleIn(wakeSyncer func()) {
 			m = newMsg(typ)
 		} else if c, ok := p.calls[id]; ok {
 			m = c.resp
-			c.done = true
-			delete(p.calls, id)
 			if typ != msgType(m) {
+				c.done = true
+				delete(p.calls, id)
 				p.setErr(fmt.Errorf("peer sent wrong response type (expected %T, got %T)", msgType(m), typ))
 				return
 			}
@@ -147,6 +147,9 @@ func (p *Peer) handleIn(wakeSyncer func()) {
 			p.in = append(p.in, taggedMessage{id, m})
 			wakeSyncer()
 		} else {
+			c := p.calls[id]
+			c.done = true
+			delete(p.calls, id)
 			p.cond.Broadcast() // wake (Call).Wait
 		}
 	}
