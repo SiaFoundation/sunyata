@@ -95,7 +95,7 @@ func (s *Syncer) handleMsgGetBlocks(p *Peer, msg *MsgGetBlocks) Message {
 	return &MsgBlocks{Blocks: blocks}
 }
 
-func (s *Syncer) handleMsgGetCheckpoint(p *Peer, msg *MsgGetCheckpoint) *MsgCheckpoint {
+func (s *Syncer) handleMsgGetCheckpoint(p *Peer, msg *MsgGetCheckpoint) Message {
 	// peer is requesting a checkpoint
 
 	b, err := s.cm.Block(msg.Index)
@@ -119,7 +119,7 @@ func (s *Syncer) handleMsgGetCheckpoint(p *Peer, msg *MsgGetCheckpoint) *MsgChec
 	return &MsgCheckpoint{Block: b, ParentContext: vc}
 }
 
-func (s *Syncer) handleMsgRelayBlock(p *Peer, msg *MsgRelayBlock) *MsgRelayBlock {
+func (s *Syncer) handleMsgRelayBlock(p *Peer, msg *MsgRelayBlock) Message {
 	// peer is relaying a block
 
 	err := s.cm.AddTipBlock(msg.Block)
@@ -127,8 +127,12 @@ func (s *Syncer) handleMsgRelayBlock(p *Peer, msg *MsgRelayBlock) *MsgRelayBlock
 		// don't relay a block multiple times
 		return nil
 	} else if errors.Is(err, chain.ErrUnknownIndex) {
-		// TODO: mark this index as a "sync target" and wake s.syncLoop
-		return msg
+		// update the peer's tip and trigger a sync
+		p.mu.Lock()
+		p.handshake.Tip = msg.Block.Index()
+		p.mu.Unlock()
+		s.cond.Broadcast() // wake s.syncLoop
+		return nil
 	} else if err != nil {
 		// TODO: this is likely a validation error, not a fatal internal error
 		s.setErr(fmt.Errorf("%T: couldn't add tip block: %w", msg, err))
@@ -137,7 +141,7 @@ func (s *Syncer) handleMsgRelayBlock(p *Peer, msg *MsgRelayBlock) *MsgRelayBlock
 	return msg
 }
 
-func (s *Syncer) handleMsgRelayTransactionSet(p *Peer, msg *MsgRelayTransactionSet) *MsgRelayTransactionSet {
+func (s *Syncer) handleMsgRelayTransactionSet(p *Peer, msg *MsgRelayTransactionSet) Message {
 	// peer is relaying a set of transactions for inclusion in the txpool
 
 	for _, txn := range msg.Transactions {
