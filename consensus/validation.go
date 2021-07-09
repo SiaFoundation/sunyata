@@ -19,6 +19,10 @@ var (
 
 	// ErrOverweight is returned when a block's weight exceeds MaxBlockWeight.
 	ErrOverweight = errors.New("block is too heavy")
+
+	// ErrInvalidInputProof is returned when a transaction contains an input
+	// with an invalid Merkle proof.
+	ErrInvalidInputProof = errors.New("transaction contains an invalid input proof")
 )
 
 // Pool for reducing heap allocations when hashing. This are only necessary
@@ -261,7 +265,7 @@ func (vc *ValidationContext) ValidateTransaction(txn sunyata.Transaction) error 
 	case !vc.validPubkeys(txn):
 		return errors.New("transaction contains unlock conditions that do not hash to the correct address")
 	case !vc.validInputMerkleProofs(txn):
-		return errors.New("transaction contains an invalid input proof")
+		return ErrInvalidInputProof
 	case !vc.validSignatures(txn):
 		return errors.New("transaction contains an invalid signature")
 	}

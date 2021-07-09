@@ -108,7 +108,7 @@ func (cs *ChainSim) MineBlockWithTxns(txns ...sunyata.Transaction) sunyata.Block
 	return b
 }
 
-func (cs *ChainSim) MineBlockWithBeneficiaries(bs ...sunyata.Beneficiary) sunyata.Block {
+func (cs *ChainSim) TxnWithBeneficiaries(bs ...sunyata.Beneficiary) sunyata.Transaction {
 	txn := sunyata.Transaction{
 		Outputs:  bs,
 		MinerFee: sunyata.NewCurrency64(cs.Context.Index.Height),
@@ -143,12 +143,16 @@ func (cs *ChainSim) MineBlockWithBeneficiaries(bs ...sunyata.Beneficiary) sunyat
 		})
 	}
 
-	// sign and mine
+	// sign
 	sigHash := cs.Context.SigHash(txn)
 	for i := range txn.Inputs {
 		txn.Inputs[i].Signature = sunyata.SignTransaction(cs.privkey, sigHash)
 	}
-	return cs.MineBlockWithTxns(txn)
+	return txn
+}
+
+func (cs *ChainSim) MineBlockWithBeneficiaries(bs ...sunyata.Beneficiary) sunyata.Block {
+	return cs.MineBlockWithTxns(cs.TxnWithBeneficiaries(bs...))
 }
 
 func (cs *ChainSim) MineBlock() sunyata.Block {
