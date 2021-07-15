@@ -49,28 +49,28 @@ func TestSyncer(t *testing.T) {
 	b := sim.Chain[len(sim.Chain)-1]
 	n1.s.Broadcast(&MsgRelayBlock{b})
 
-	time.Sleep(time.Second / 2)
+	time.Sleep(500 * time.Millisecond)
 	if n1.c.Tip() != n2.c.Tip() {
 		t.Fatal("peers did not sync:", n1.c.Tip(), n2.c.Tip())
 	}
 
-	// relay old block - shouldnt change anything
+	// relay old block - shouldn't change anything
 	oldTip := n1.c.Tip()
 	b = sim.Chain[len(sim.Chain)-2]
 	n1.s.Broadcast(&MsgRelayBlock{b})
 
-	time.Sleep(time.Second / 2)
+	time.Sleep(500 * time.Millisecond)
 	if n1.c.Tip() != oldTip || n2.c.Tip() != oldTip {
 		t.Fatalf("tip went backwards (expected: %v): %v %v", oldTip, n1.c.Tip(), n2.c.Tip())
 	}
 
-	// relay invalid block - shouldnt change anything
+	// relay invalid block - shouldn't change anything
 	b = sim.Chain[len(sim.Chain)-1]
 	b.Header.Height = 999
 
 	n1.s.Broadcast(&MsgRelayBlock{b})
 
-	time.Sleep(time.Second / 2)
+	time.Sleep(500 * time.Millisecond)
 	if n1.c.Tip() != oldTip || n2.c.Tip() != oldTip {
 		t.Fatalf("accepted invalid tip (expected: %v): %v %v", oldTip, n1.c.Tip(), n2.c.Tip())
 	}
