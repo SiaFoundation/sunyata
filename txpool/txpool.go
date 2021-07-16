@@ -25,7 +25,6 @@ func (p *Pool) validateTransaction(txn sunyata.Transaction) error {
 	// validate again.
 	err := p.vc.ValidateTransaction(txn)
 	if err == consensus.ErrInvalidInputProof && p.prevVC.ValidateTransaction(txn) == nil {
-		txn = txn.DeepCopy() // don't modify input
 		for i := range txn.Inputs {
 			p.prevUpdate.UpdateOutputProof(&txn.Inputs[i].Parent)
 		}
@@ -71,10 +70,12 @@ func (p *Pool) AddTransaction(txn sunyata.Transaction) error {
 	txid := txn.ID()
 	if _, ok := p.txns[txid]; ok {
 		return nil // already in pool
-	} else if err := p.validateTransaction(txn); err != nil {
+	}
+	txn = txn.DeepCopy()
+	if err := p.validateTransaction(txn); err != nil {
 		return err
 	}
-	p.txns[txid] = txn.DeepCopy()
+	p.txns[txid] = txn
 	return nil
 }
 
