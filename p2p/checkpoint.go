@@ -54,40 +54,32 @@ func DownloadCheckpoint(ctx context.Context, addr string, genesisID sunyata.Bloc
 	}
 
 	// request checkpoint
-	if err := writeMessage(conn, &MsgGetCheckpoint{Index: index}); err != nil {
-		return consensus.Checkpoint{}, fmt.Errorf("couldn't write message: %w", err)
+	p := &Peer{
+		conn:      conn,
+		handshake: theirs,
+		calls:     make(map[uint32]*Call),
 	}
+	p.cond.L = &p.mu
+	defer p.disconnect()
+	go p.handleIn(func() {})
+	go p.handleOut()
 
-	// read response
-	//
-	// NOTE: peer might send us relay or sync messages, so wait for up to three
-	// messages before giving up
-	var msg *MsgCheckpoint
-	for i := 0; ; i++ {
-		m, err := readMessage(conn)
-		if err != nil {
-			return consensus.Checkpoint{}, fmt.Errorf("couldn't read message: %w", err)
-		}
-		var ok bool
-		msg, ok = m.(*MsgCheckpoint)
-		if ok {
-			break
-		} else if i > 2 {
-			return consensus.Checkpoint{}, fmt.Errorf("peer sent wrong message type (%T)", m)
-		}
+	var resp MsgCheckpoint
+	if err := p.RPC(&MsgGetCheckpoint{Index: index}, &resp).Wait(); err != nil {
+		return consensus.Checkpoint{}, fmt.Errorf("RPC failed: %w", err)
 	}
 
 	// validate response
-	if msg.Block.Index() != index || msg.Block.Header.ParentIndex() != msg.ParentContext.Index {
+	if resp.Block.Index() != index || resp.Block.Header.ParentIndex() != resp.ParentContext.Index {
 		return consensus.Checkpoint{}, errors.New("wrong checkpoint header")
 	}
-	commitment := msg.ParentContext.Commitment(msg.Block.Header.MinerAddress, msg.Block.Transactions)
-	if commitment != msg.Block.Header.Commitment {
+	commitment := resp.ParentContext.Commitment(resp.Block.Header.MinerAddress, resp.Block.Transactions)
+	if commitment != resp.Block.Header.Commitment {
 		return consensus.Checkpoint{}, errors.New("wrong checkpoint commitment")
 	}
 
 	return consensus.Checkpoint{
-		Block:   msg.Block,
-		Context: consensus.ApplyBlock(msg.ParentContext, msg.Block).Context,
+		Block:   resp.Block,
+		Context: consensus.ApplyBlock(resp.ParentContext, resp.Block).Context,
 	}, nil
 }

@@ -30,66 +30,107 @@ type Message interface {
 	decodeFrom(b *msgBuffer)
 }
 
-func readMessage(r io.Reader) (Message, error) {
-	// read type and length prefix
-	hdr := make([]byte, 5)
-	if n, err := io.ReadFull(r, hdr); err != nil {
-		return nil, fmt.Errorf("could not read message type and length (%v/%v bytes): %w", n, len(hdr), err)
-	}
-	// TODO: reject too-large messages based on type
-
-	// read encrypted message
-	typ := hdr[0]
-	m := map[uint8]Message{
-		typGetHeaders:          new(MsgGetHeaders),
-		typHeaders:             new(MsgHeaders),
-		typGetTransactions:     new(MsgGetBlocks),
-		typTransactions:        new(MsgBlocks),
-		typRelayBlock:          new(MsgRelayBlock),
-		typRelayTransactionSet: new(MsgRelayTransactionSet),
-		typGetCheckpoint:       new(MsgGetCheckpoint),
-		typCheckpoint:          new(MsgCheckpoint),
-	}[typ]
-	if m == nil {
-		return nil, fmt.Errorf("unrecognized message type (%v)", typ)
-	}
-	msgLen := binary.LittleEndian.Uint32(hdr[1:])
-	buf := make([]byte, msgLen)
-	if n, err := io.ReadFull(r, buf); err != nil {
-		return nil, fmt.Errorf("could not read %T (%v/%v bytes): %w", m, n, len(buf), err)
-	}
-	var b msgBuffer
-	b.write(buf)
-	m.decodeFrom(&b)
-	return m, b.err
-}
-
-func writeMessage(w io.Writer, m Message) error {
-	buf := make([]byte, 5)
-	binary.LittleEndian.PutUint32(buf[1:], uint32(m.encodedSize()))
+func msgType(m Message) uint8 {
 	switch m.(type) {
 	case *MsgGetHeaders:
-		buf[0] = typGetHeaders
+		return typGetHeaders
 	case *MsgHeaders:
-		buf[0] = typHeaders
+		return typHeaders
 	case *MsgGetBlocks:
-		buf[0] = typGetTransactions
+		return typGetTransactions
 	case *MsgBlocks:
-		buf[0] = typTransactions
+		return typTransactions
 	case *MsgRelayBlock:
-		buf[0] = typRelayBlock
+		return typRelayBlock
 	case *MsgRelayTransactionSet:
-		buf[0] = typRelayTransactionSet
+		return typRelayTransactionSet
 	case *MsgGetCheckpoint:
-		buf[0] = typGetCheckpoint
+		return typGetCheckpoint
 	case *MsgCheckpoint:
-		buf[0] = typCheckpoint
+		return typCheckpoint
 	default:
 		panic(fmt.Sprintf("unhandled message type: %T", m))
 	}
+}
+
+func isRelayMessage(m Message) bool {
+	switch m.(type) {
+	case *MsgRelayBlock:
+		return true
+	case *MsgRelayTransactionSet:
+		return true
+	default:
+		return false
+	}
+}
+
+func newMsg(typ uint8) Message {
+	switch typ {
+	case typGetHeaders:
+		return new(MsgGetHeaders)
+	case typHeaders:
+		return new(MsgHeaders)
+	case typGetTransactions:
+		return new(MsgGetBlocks)
+	case typTransactions:
+		return new(MsgBlocks)
+	case typRelayBlock:
+		return new(MsgRelayBlock)
+	case typRelayTransactionSet:
+		return new(MsgRelayTransactionSet)
+	case typGetCheckpoint:
+		return new(MsgGetCheckpoint)
+	case typCheckpoint:
+		return new(MsgCheckpoint)
+	default:
+		return nil
+	}
+}
+
+type taggedMessage struct {
+	id uint32
+	m  Message
+}
+
+func readMessageHeader(r io.Reader) (typ uint8, id uint32, err error) {
+	// read type and id
+	hdr := make([]byte, 5)
+	if n, err := io.ReadFull(r, hdr); err != nil {
+		return 0, 0, fmt.Errorf("could not read message type and length (%v/%v bytes): %w", n, len(hdr), err)
+	} else if hdr[0] > typCheckpoint {
+		return 0, 0, fmt.Errorf("unrecognized message type (%v)", hdr[0])
+	}
+	return hdr[0], binary.LittleEndian.Uint32(hdr[1:]), nil
+}
+
+func readMessage(r io.Reader, recv Message) error {
+	// read length prefix
+	// TODO: reject too-large messages based on type
+	lenBuf := make([]byte, 4)
+	if n, err := io.ReadFull(r, lenBuf); err != nil {
+		return fmt.Errorf("could not read message length (%v/%v bytes): %w", n, len(lenBuf), err)
+	}
+
+	// read message
+	msgLen := binary.LittleEndian.Uint32(lenBuf)
+	buf := make([]byte, msgLen)
+	if n, err := io.ReadFull(r, buf); err != nil {
+		return fmt.Errorf("could not read %T (%v/%v bytes): %w", recv, n, len(buf), err)
+	}
+	var b msgBuffer
+	b.write(buf)
+	recv.decodeFrom(&b)
+	return b.err
+}
+
+func writeMessage(w io.Writer, tm taggedMessage) error {
+	buf := make([]byte, 9)
+	buf[0] = msgType(tm.m)
+	binary.LittleEndian.PutUint32(buf[1:], tm.id)
+	binary.LittleEndian.PutUint32(buf[5:], uint32(tm.m.encodedSize()))
 	var mb msgBuffer
 	mb.write(buf)
-	m.encodeTo(&mb)
+	tm.m.encodeTo(&mb)
 	_, err := w.Write(mb.buf.Bytes())
 	return err
 }

@@ -39,58 +39,24 @@ func (s *Syncer) setErr(err error) error {
 	return s.err
 }
 
-func (s *Syncer) handleMessage(p *Peer, msg Message) {
+func (s *Syncer) handleRequest(p *Peer, msg Message) Message {
 	switch msg := msg.(type) {
 	case *MsgGetHeaders:
-		s.processMsgGetHeaders(p, msg)
-	case *MsgHeaders:
-		s.processMsgHeaders(p, msg)
+		return s.handleMsgGetHeaders(p, msg)
 	case *MsgGetBlocks:
-		s.processMsgGetBlocks(p, msg)
-	case *MsgBlocks:
-		s.processMsgBlocks(p, msg)
-	case *MsgRelayBlock:
-		s.processMsgRelayBlock(p, msg)
-	case *MsgRelayTransactionSet:
-		s.processMsgRelayTransactionSet(p, msg)
+		return s.handleMsgGetBlocks(p, msg)
 	case *MsgGetCheckpoint:
-		s.processMsgGetCheckpoint(p, msg)
-	case *MsgCheckpoint:
-		// we only receive this message in DownloadCheckpoint
-		p.warn(errors.New("unsolicited checkpoint"))
+		return s.handleMsgGetCheckpoint(p, msg)
+	case *MsgRelayBlock:
+		return s.handleMsgRelayBlock(p, msg)
+	case *MsgRelayTransactionSet:
+		return s.handleMsgRelayTransactionSet(p, msg)
 	default:
-		panic(fmt.Sprintf("unhandled message type (%T)", msg))
+		return nil
 	}
 }
 
-func (s *Syncer) processMsgGetCheckpoint(p *Peer, msg *MsgGetCheckpoint) {
-	// peer is requesting a checkpoint
-
-	b, err := s.cm.Block(msg.Index)
-	if errors.Is(err, chain.ErrPruned) {
-		return // nothing we can do
-	} else if errors.Is(err, chain.ErrUnknownIndex) {
-		p.warn(err)
-		return
-	} else if err != nil {
-		s.setErr(fmt.Errorf("%T: couldn't load block: %w", msg, err))
-		return
-	}
-	vc, err := s.cm.ValidationContext(b.Header.ParentIndex())
-	if errors.Is(err, chain.ErrPruned) {
-		return
-	} else if err != nil {
-		s.setErr(fmt.Errorf("%T: couldn't load validation context: %w", msg, err))
-		return
-	}
-
-	p.queue(&MsgCheckpoint{
-		Block:         b,
-		ParentContext: vc,
-	})
-}
-
-func (s *Syncer) processMsgGetHeaders(p *Peer, msg *MsgGetHeaders) {
+func (s *Syncer) handleMsgGetHeaders(p *Peer, msg *MsgGetHeaders) Message {
 	// peer is requesting headers in bulk
 
 	sort.Slice(msg.History, func(i, j int) bool {
@@ -99,56 +65,17 @@ func (s *Syncer) processMsgGetHeaders(p *Peer, msg *MsgGetHeaders) {
 	headers, err := s.cm.HeadersForHistory(make([]sunyata.BlockHeader, 2000), msg.History)
 	if err != nil {
 		s.setErr(fmt.Errorf("%T: couldn't load headers: %w", msg, err))
-		return
+		return nil
 	}
-	if len(headers) > 0 {
-		p.queue(&MsgHeaders{Headers: headers})
-	}
+	return &MsgHeaders{Headers: headers}
 }
 
-func (s *Syncer) processMsgHeaders(p *Peer, msg *MsgHeaders) {
-	// peer is sending us headers, a subset of which should attach to one of our
-	// known chains.
-
-	if len(msg.Headers) == 0 {
-		p.ban(errors.New("empty headers message"))
-		return
-	} else if msg.Headers[0].Height == 0 {
-		p.ban(errors.New("headers message should never contain genesis header"))
-		return
-	}
-
-	newBest, err := s.cm.AddHeaders(msg.Headers)
-	if errors.Is(err, chain.ErrUnknownIndex) {
-		// NOTE: attempting to synchronize again would be a bad idea: it could
-		// easily lead to an infinite loop. Instead, just ignore these headers.
-		return
-	} else if err != nil {
-		s.setErr(fmt.Errorf("%T: couldn't add headers: %w", msg, err))
-		return
-	}
-	if newBest == nil {
-		// request the next set of headers
-		last := []sunyata.ChainIndex{msg.Headers[len(msg.Headers)-1].Index()}
-		p.queue(&MsgGetHeaders{History: last})
-		return
-	}
-
-	// we now have a new best chain (assuming its transaction are valid);
-	// request those transactions
-	blocks := newBest.Unvalidated()
-	if len(blocks) > 10 {
-		blocks = blocks[:10]
-	}
-	p.queue(&MsgGetBlocks{Blocks: blocks})
-}
-
-func (s *Syncer) processMsgGetBlocks(p *Peer, msg *MsgGetBlocks) {
+func (s *Syncer) handleMsgGetBlocks(p *Peer, msg *MsgGetBlocks) Message {
 	// peer is requesting blocks
 
 	if len(msg.Blocks) == 0 {
 		p.ban(fmt.Errorf("empty %T", msg))
-		return
+		return nil
 	}
 
 	var blocks []sunyata.Block
@@ -161,87 +88,76 @@ func (s *Syncer) processMsgGetBlocks(p *Peer, msg *MsgGetBlocks) {
 			break
 		} else if err != nil {
 			s.setErr(fmt.Errorf("%T: couldn't load transactions: %w", msg, err))
-			return
+			return nil
 		}
 		blocks = append(blocks, b)
 	}
-	if len(blocks) > 0 {
-		p.queue(&MsgBlocks{Blocks: blocks})
-	}
+	return &MsgBlocks{Blocks: blocks}
 }
 
-func (s *Syncer) processMsgBlocks(p *Peer, msg *MsgBlocks) {
-	// peer is sending us the blocks we requested; they should match up exactly
-	// with one of our existing scratch chains.
+func (s *Syncer) handleMsgGetCheckpoint(p *Peer, msg *MsgGetCheckpoint) Message {
+	// peer is requesting a checkpoint
 
-	sc, err := s.cm.AddBlocks(msg.Blocks)
-	if errors.Is(err, chain.ErrUnknownIndex) {
-		p.warn(fmt.Errorf("%T: non-attaching blocks: %w", msg, err))
-		return
+	b, err := s.cm.Block(msg.Index)
+	if errors.Is(err, chain.ErrPruned) {
+		return nil // nothing we can do
+	} else if errors.Is(err, chain.ErrUnknownIndex) {
+		p.warn(err)
+		return nil
 	} else if err != nil {
-		s.setErr(fmt.Errorf("%T: couldn't add blocks: %w", msg, err))
-		return
+		s.setErr(fmt.Errorf("%T: couldn't load block: %w", msg, err))
+		return nil
 	}
-	if blocks := sc.Unvalidated(); len(blocks) > 0 {
-		// request the next set of blocks
-		if len(blocks) > 10 {
-			blocks = blocks[:10]
-		}
-		p.queue(&MsgGetBlocks{Blocks: blocks})
-		return
+	vc, err := s.cm.ValidationContext(b.Header.ParentIndex())
+	if errors.Is(err, chain.ErrPruned) {
+		return nil
+	} else if err != nil {
+		s.setErr(fmt.Errorf("%T: couldn't load validation context: %w", msg, err))
+		return nil
 	}
 
-	// request the next set of headers
-	tip := []sunyata.ChainIndex{sc.ValidTip()}
-	p.queue(&MsgGetHeaders{History: tip})
+	return &MsgCheckpoint{Block: b, ParentContext: vc}
 }
 
-func (s *Syncer) processMsgRelayBlock(p *Peer, msg *MsgRelayBlock) {
+func (s *Syncer) handleMsgRelayBlock(p *Peer, msg *MsgRelayBlock) Message {
 	// peer is relaying a block
 
 	err := s.cm.AddTipBlock(msg.Block)
 	if errors.Is(err, chain.ErrKnownBlock) {
-		// avoid relaying a block multiple times
-		return
+		// don't relay a block multiple times
+		return nil
 	} else if errors.Is(err, chain.ErrUnknownIndex) {
-		// block does not attach to our tip; request a full history
-		history, err := s.cm.History()
-		if err != nil {
-			s.setErr(fmt.Errorf("%T: couldn't construct history: %w", msg, err))
-			return
-		}
-		p.queue(&MsgGetHeaders{History: history})
-		return
+		// update the peer's tip and trigger a sync
+		p.mu.Lock()
+		p.handshake.Tip = msg.Block.Index()
+		p.mu.Unlock()
+		s.cond.Broadcast() // wake s.syncLoop
+		return nil
 	} else if err != nil {
 		// TODO: this is likely a validation error, not a fatal internal error
 		s.setErr(fmt.Errorf("%T: couldn't add tip block: %w", msg, err))
-		return
+		return nil
 	}
-
-	s.relay(p, msg)
+	return msg
 }
 
-func (s *Syncer) processMsgRelayTransactionSet(p *Peer, msg *MsgRelayTransactionSet) {
+func (s *Syncer) handleMsgRelayTransactionSet(p *Peer, msg *MsgRelayTransactionSet) Message {
 	// peer is relaying a set of transactions for inclusion in the txpool
 
-	allValid := true
 	for _, txn := range msg.Transactions {
 		if err := s.tp.AddTransaction(txn); err != nil {
 			p.warn(fmt.Errorf("%T: invalid txn: %w", msg, err))
-			allValid = false
+			return nil
 		}
 	}
-
-	if allValid {
-		s.relay(p, msg)
-	}
+	return msg
 }
 
 // Run initiates communication with peers. This is a blocking call; it processes
 // messages until the Syncer is closed or encounters a fatal error.
 func (s *Syncer) Run() error {
 	go s.acceptLoop()
-	go s.messageLoop()
+	go s.requestLoop()
 	go s.syncLoop()
 
 	s.cond.L.Lock()
@@ -274,17 +190,27 @@ func (s *Syncer) acceptLoop() {
 	}
 }
 
-func (s *Syncer) messageLoop() {
+func (s *Syncer) requestLoop() {
 	s.cond.L.Lock()
 	defer s.cond.L.Unlock()
 	for s.err == nil {
 		s.removeDisconnected()
-		p, msg := s.nextMessage()
-		if msg == nil {
+		p, tm := s.nextRequest()
+		if p == nil {
 			s.cond.Wait()
 			continue
 		}
-		s.handleMessage(p, msg)
+		resp := s.handleRequest(p, tm.m)
+		if resp == nil {
+			continue // bad request; handleRequest is responsible for warning/banning the peer
+		} else if isRelayMessage(resp) {
+			s.relay(p, resp)
+		} else {
+			p.mu.Lock()
+			p.out = append(p.out, taggedMessage{tm.id | 1, resp})
+			p.cond.Broadcast() // wake p.handleOut
+			p.mu.Unlock()
+		}
 	}
 }
 
@@ -295,19 +221,100 @@ func (s *Syncer) syncLoop() {
 	seen := make(map[sunyata.ChainIndex]bool)
 	for s.err == nil {
 		// initiate header sync with any new peers
+		s.removeDisconnected()
 		for _, p := range s.peers {
 			if !seen[p.handshake.Tip] {
-				history, err := s.cm.History()
-				if err != nil {
-					s.setErr(err)
-					return
-				}
-				p.queue(&MsgGetHeaders{History: history})
 				seen[p.handshake.Tip] = true
+				s.syncToTarget(p, p.handshake.Tip)
 			}
 		}
 
 		s.cond.Wait()
+	}
+}
+
+func (s *Syncer) syncToTarget(p *Peer, target sunyata.ChainIndex) {
+	// helper functions for calling RPCs
+	getHeaders := func(history []sunyata.ChainIndex) []sunyata.BlockHeader {
+		req := &MsgGetHeaders{History: history}
+		var resp MsgHeaders
+		// unlock during call
+		s.cond.L.Unlock()
+		err := p.RPC(req, &resp).Wait()
+		s.cond.L.Lock()
+		if err != nil {
+			p.disconnect()
+			return nil
+		} else if len(resp.Headers) > 0 && resp.Headers[0].Height == 0 {
+			p.ban(errors.New("headers message should never contain genesis header"))
+			return nil
+		}
+		return resp.Headers
+	}
+	getBlocks := func(blocks []sunyata.ChainIndex) []sunyata.Block {
+		req := &MsgGetBlocks{Blocks: blocks}
+		var resp MsgBlocks
+		s.cond.L.Unlock()
+		err := p.RPC(req, &resp).Wait()
+		s.cond.L.Lock()
+		if err != nil {
+			p.disconnect()
+			return nil
+		}
+		return resp.Blocks
+	}
+
+	// exchange history
+	history, err := s.cm.History()
+	if err != nil {
+		s.setErr(err)
+		return
+	}
+	for {
+		headers := getHeaders(history)
+		if len(headers) == 0 {
+			return
+		}
+		sc, err := s.cm.AddHeaders(headers)
+		if errors.Is(err, chain.ErrUnknownIndex) {
+			// NOTE: attempting to synchronize again would be a bad idea: it could
+			// easily lead to an infinite loop. Instead, just ignore these headers.
+			return
+		} else if err != nil {
+			s.setErr(fmt.Errorf("syncLoop: couldn't add headers: %w", err))
+			return
+		}
+		if sc == nil {
+			// this chain is still not the best known; request more headers
+			history = []sunyata.ChainIndex{headers[len(headers)-1].Index()}
+			continue
+		}
+
+		// we now have a new best chain, assuming its transaction are valid;
+		// request those transactions
+		for !sc.FullyValidated() {
+			unvalidated := sc.Unvalidated()
+			if len(unvalidated) > 10 {
+				unvalidated = unvalidated[:10]
+			}
+			blocks := getBlocks(unvalidated)
+			if blocks == nil {
+				return
+			}
+			sc, err = s.cm.AddBlocks(blocks)
+			if errors.Is(err, chain.ErrUnknownIndex) {
+				p.warn(fmt.Errorf("syncLoop: non-attaching blocks: %w", err))
+				return
+			} else if err != nil {
+				s.setErr(fmt.Errorf("syncLoop: couldn't add blocks: %w", err))
+				return
+			}
+		}
+		// if we reached the target index, we're done; otherwise, request more headers
+		if sc.Contains(target) {
+			return
+		}
+		history = []sunyata.ChainIndex{sc.ValidTip()}
 	}
 }
 
