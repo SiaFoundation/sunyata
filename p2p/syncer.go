@@ -10,6 +10,7 @@ import (
 
 	"go.sia.tech/sunyata"
 	"go.sia.tech/sunyata/chain"
+	"go.sia.tech/sunyata/consensus"
 	"go.sia.tech/sunyata/txpool"
 )
 
@@ -225,7 +226,10 @@ func (s *Syncer) syncLoop() {
 		for _, p := range s.peers {
 			if !seen[p.handshake.Tip] {
 				seen[p.handshake.Tip] = true
-				s.syncToTarget(p, p.handshake.Tip)
+				// unlock during sync
+				s.mu.Unlock()
+				s.syncToTarget(p.handshake.Tip, p)
+				s.mu.Lock()
 			}
 		}
 
@@ -233,48 +237,160 @@ func (s *Syncer) syncLoop() {
 	}
 }
 
-func (s *Syncer) syncToTarget(p *Peer, target sunyata.ChainIndex) {
+func (s *Syncer) syncToTarget(target sunyata.ChainIndex, targetPeer *Peer) {
+	const blocksPerRequest = 16
+
 	// helper functions for calling RPCs
-	getHeaders := func(history []sunyata.ChainIndex) []sunyata.BlockHeader {
-		req := &MsgGetHeaders{History: history}
+	getHeaders := func(p *Peer, history []sunyata.ChainIndex) ([]sunyata.BlockHeader, error) {
 		var resp MsgHeaders
-		// unlock during call
-		s.cond.L.Unlock()
-		err := p.RPC(req, &resp).Wait()
-		s.cond.L.Lock()
+		err := p.RPC(&MsgGetHeaders{History: history}, &resp).Wait()
 		if err != nil {
 			p.disconnect()
-			return nil
+			return nil, err
 		} else if len(resp.Headers) > 0 && resp.Headers[0].Height == 0 {
-			p.ban(errors.New("headers message should never contain genesis header"))
-			return nil
+			err := errors.New("headers message should never contain genesis header")
+			p.ban(err)
+			return nil, err
 		}
-		return resp.Headers
+		return resp.Headers, nil
 	}
-	getBlocks := func(blocks []sunyata.ChainIndex) []sunyata.Block {
-		req := &MsgGetBlocks{Blocks: blocks}
-		var resp MsgBlocks
-		s.cond.L.Unlock()
-		err := p.RPC(req, &resp).Wait()
-		s.cond.L.Lock()
+	getBlocks := func(p *Peer, blocks []sunyata.ChainIndex) ([]sunyata.Block, error) {
+		var blocksResp MsgBlocks
+		err := p.RPC(&MsgGetBlocks{Blocks: blocks}, &blocksResp).Wait()
 		if err != nil {
 			p.disconnect()
-			return nil
+			return nil, err
 		}
-		return resp.Blocks
+		return blocksResp.Blocks, nil
 	}
 
-	// exchange history
+	// helper types for download workers
+	type req struct {
+		p          *Peer
+		chunkIndex int
+		blocks     []sunyata.ChainIndex
+	}
+	type resp struct {
+		req    req
+		blocks []sunyata.Block
+		err    error
+	}
+
+	// create channels and workers
+	const numWorkers = 8
+	reqChan := make(chan req, numWorkers)
+	defer close(reqChan)
+	respChan := make(chan resp, numWorkers)
+	workerFunc := func() {
+		for req := range reqChan {
+			blocks, err := getBlocks(req.p, req.blocks)
+			respChan <- resp{
+				req:    req,
+				blocks: blocks,
+				err:    err,
+			}
+		}
+	}
+	for i := 0; i < numWorkers; i++ {
+		go workerFunc()
+	}
+
+	// helper function for downloading blocks in parallel
+	getBlocksForChain := func(sc *consensus.ScratchChain) error {
+		// store the current set of peers and define a helper function for
+		// selecting a random peer
+		peers := make(map[*Peer]struct{})
+		s.mu.Lock()
+		s.removeDisconnected()
+		for _, p := range s.peers {
+			peers[p] = struct{}{}
+		}
+		s.mu.Unlock()
+		if len(peers) == 0 {
+			return errors.New("no peers")
+		}
+		randomPeer := func() *Peer {
+			for p := range peers {
+				return p
+			}
+			return nil
+		}
+
+		// send initial requests
+		unvalidated := sc.Unvalidated()
+		chunkIndex := 0
+		for chunkIndex < numWorkers && chunkIndex*blocksPerRequest < len(unvalidated) {
+			blocks := unvalidated[chunkIndex*blocksPerRequest:]
+			if len(blocks) > blocksPerRequest {
+				blocks = blocks[:blocksPerRequest]
+			}
+			reqChan <- req{
+				p:          randomPeer(),
+				chunkIndex: chunkIndex,
+				blocks:     blocks,
+			}
+			chunkIndex++
+		}
+
+		// process responses, retrying failed chunks and requesting new chunks
+		// as needed until all blocks have been downloaded
+		buf := make([][]sunyata.Block, 8)
+		cursor := 0
+		for {
+			r := <-respChan
+			if r.err != nil {
+				// don't use this peer again
+				delete(peers, r.req.p)
+				// retry this chunk with a different peer
+				p := randomPeer()
+				if p == nil {
+					return errors.New("no peers left to try")
+				}
+				r.req.p = p
+				reqChan <- r.req
+				continue
+			}
+
+			// add blocks to circular buffer and drain as much as we can
+			buf[r.req.chunkIndex%len(buf)] = r.blocks
+			for buf[cursor%len(buf)] != nil {
+				if _, err := s.cm.AddBlocks(buf[cursor%len(buf)]); err != nil {
+					return err
+				}
+				buf[cursor%len(buf)] = nil
+				cursor++
+			}
+
+			if sc.FullyValidated() {
+				return nil
+			} else if chunkIndex*blocksPerRequest < len(unvalidated) {
+				// request the next chunk
+				blocks := unvalidated[chunkIndex*blocksPerRequest:]
+				if len(blocks) > blocksPerRequest {
+					blocks = blocks[:blocksPerRequest]
+				}
+				reqChan <- req{
+					chunkIndex: chunkIndex,
+					blocks:     blocks,
+				}
+				chunkIndex++
+			}
+		}
+	}
+
+	// in a loop, request the next batch of headers from targetPeer, then
+	// download the corresponding blocks from available peers
 	history, err := s.cm.History()
 	if err != nil {
 		s.setErr(err)
 		return
 	}
 	for {
-		headers := getHeaders(history)
-		if len(headers) == 0 {
+		headers, err := getHeaders(targetPeer, history)
+		if err != nil || len(headers) == 0 {
 			return
 		}
+
 		sc, err := s.cm.AddHeaders(headers)
 		if errors.Is(err, chain.ErrUnknownIndex) {
 			// NOTE: attempting to synchronize again would be a bad idea: it could
@@ -283,37 +399,16 @@ func (s *Syncer) syncToTarget(p *Peer, target sunyata.ChainIndex) {
 		} else if err != nil {
 			s.setErr(fmt.Errorf("syncLoop: couldn't add headers: %w", err))
 			return
-		}
-		if sc == nil {
+		} else if sc == nil {
 			// this chain is still not the best known; request more headers
 			history = []sunyata.ChainIndex{headers[len(headers)-1].Index()}
 			continue
 		}
 
-		// we now have a new best chain, assuming its transaction are valid;
-		// request those transactions
-		for !sc.FullyValidated() {
-			unvalidated := sc.Unvalidated()
-			if len(unvalidated) > 10 {
-				unvalidated = unvalidated[:10]
-			}
-			blocks := getBlocks(unvalidated)
-			if blocks == nil {
-				return
-			}
-			sc, err = s.cm.AddBlocks(blocks)
-			if errors.Is(err, chain.ErrUnknownIndex) {
-				p.warn(fmt.Errorf("syncLoop: non-attaching blocks: %w", err))
-				return
-			} else if err != nil {
-				s.setErr(fmt.Errorf("syncLoop: couldn't add blocks: %w", err))
-				return
-			}
-		}
-		// if we reached the target index, we're done; otherwise, request more headers
-		if sc.Contains(target) {
+		if err := getBlocksForChain(sc); err != nil {
 			return
 		}
+
 		history = []sunyata.ChainIndex{sc.ValidTip()}
 	}
 }
