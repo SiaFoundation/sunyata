@@ -234,6 +234,9 @@ func (s *Syncer) syncLoop() {
 }
 
 func (s *Syncer) syncToTarget(p *Peer, target sunyata.ChainIndex) {
+	// Number of blocks that can be requested at once from a single peer.
+	const BlocksPerRequest = 16
+
 	// helper functions for calling RPCs
 	getHeaders := func(history []sunyata.ChainIndex) []sunyata.BlockHeader {
 		req := &MsgGetHeaders{History: history}
@@ -251,17 +254,15 @@ func (s *Syncer) syncToTarget(p *Peer, target sunyata.ChainIndex) {
 		}
 		return resp.Headers
 	}
-	getBlocks := func(blocks []sunyata.ChainIndex) []sunyata.Block {
+	getBlocks := func(p *Peer, blocks []sunyata.ChainIndex) ([]sunyata.Block, error) {
 		req := &MsgGetBlocks{Blocks: blocks}
 		var resp MsgBlocks
-		s.cond.L.Unlock()
 		err := p.RPC(req, &resp).Wait()
-		s.cond.L.Lock()
 		if err != nil {
 			p.disconnect()
-			return nil
+			return nil, err
 		}
-		return resp.Blocks
+		return resp.Blocks, nil
 	}
 
 	// exchange history
@@ -294,21 +295,80 @@ func (s *Syncer) syncToTarget(p *Peer, target sunyata.ChainIndex) {
 		// request those transactions
 		for !sc.FullyValidated() {
 			unvalidated := sc.Unvalidated()
-			if len(unvalidated) > 10 {
-				unvalidated = unvalidated[:10]
+
+			chunks := len(unvalidated) / BlocksPerRequest
+			if len(unvalidated)%BlocksPerRequest != 0 {
+				chunks++
 			}
-			blocks := getBlocks(unvalidated)
-			if blocks == nil {
-				return
+			unaddedChunks := make([][]sunyata.Block, chunks)
+
+			var chunkMu sync.Mutex
+			var wg sync.WaitGroup
+			wg.Add(chunks)
+			s.cond.L.Unlock()
+			for i := 0; i < chunks; i++ {
+				go func(chunkIndex int) {
+					defer wg.Done()
+
+					// download in chunks of 16 (BlocksPerRequest)
+					begin := chunkIndex * BlocksPerRequest
+					end := begin + BlocksPerRequest
+					if end > len(unvalidated) {
+						end = len(unvalidated)
+					}
+
+				download:
+					// get peer here (right before RPC request) instead of
+					// before the goroutine so that we don't accidentally
+					// connect to a disconnected peer in the event of an error
+					s.cond.L.Lock()
+					if len(s.peers) == 0 {
+						// ran out of peers due to errors?
+						s.cond.L.Unlock()
+						return
+					}
+					p := s.peers[chunkIndex%len(s.peers)]
+					s.cond.L.Unlock()
+
+					blocks, err := getBlocks(p, unvalidated[begin:end])
+					if err != nil {
+						// getBlocks disconnects peers that error so
+						// we do not need any special error handling logic here
+						// other than retrying because there's nothing we can
+						// really do other than try again
+						goto download
+					}
+
+					chunkMu.Lock()
+					unaddedChunks[chunkIndex] = blocks
+					for i, chunk := range unaddedChunks {
+						if len(chunk) == 0 {
+							continue
+						}
+						// make a new scratch chain
+						// if the blocks are adjacent then there should be no
+						// error and we will replace the current scratch chain
+						// (sc) with newSc
+						newSc, err := s.cm.AddBlocks(chunk)
+						if err == nil {
+							sc = newSc
+							// remove this chunk from memory now that it has
+							// been added
+							unaddedChunks[i] = nil
+						} else if i == chunkIndex && !errors.Is(err, chain.ErrUnknownIndex) {
+							// if we have an error for the chunk we just downloaded
+							// and it's not just an error caused by the fact that
+							// we haven't downloaded the previous blocks yet
+							p.disconnect()
+							chunkMu.Unlock()
+							goto download
+						}
+					}
+					chunkMu.Unlock()
+				}(i)
 			}
-			sc, err = s.cm.AddBlocks(blocks)
-			if errors.Is(err, chain.ErrUnknownIndex) {
-				p.warn(fmt.Errorf("syncLoop: non-attaching blocks: %w", err))
-				return
-			} else if err != nil {
-				s.setErr(fmt.Errorf("syncLoop: couldn't add blocks: %w", err))
-				return
-			}
+			wg.Wait()
+			s.cond.L.Lock()
 		}
 		// if we reached the target index, we're done; otherwise, request more headers
 		if sc.Contains(target) {

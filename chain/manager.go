@@ -279,6 +279,9 @@ func (m *Manager) AddBlocks(blocks []sunyata.Block) (*consensus.ScratchChain, er
 	// the chain may already contain some of the supplied blocks; ignore
 	// the ones we already have
 	have := chain.ValidTip().Height - (index.Height - 1)
+	if have > uint64(len(blocks)) {
+		return nil, fmt.Errorf("not enough blocks")
+	}
 	blocks = blocks[have:]
 
 	for _, b := range blocks {
