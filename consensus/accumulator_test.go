@@ -71,31 +71,22 @@ func TestAccumulator(t *testing.T) {
 		return false
 	}
 
-	b := sunyata.Block{
-		Header: sunyata.BlockHeader{
-			MinerAddress: randAddr(),
-		},
-		Transactions: []sunyata.Transaction{{
-			Outputs: []sunyata.Beneficiary{
-				{Value: randAmount(), Address: randAddr()},
-				{Value: randAmount(), Address: randAddr()},
-				{Value: randAmount(), Address: randAddr()},
-				{Value: randAmount(), Address: randAddr()},
-				{Value: randAmount(), Address: randAddr()},
-				{Value: randAmount(), Address: randAddr()},
-				{Value: randAmount(), Address: randAddr()},
-				{Value: randAmount(), Address: randAddr()},
-				{Value: randAmount(), Address: randAddr()},
-				{Value: randAmount(), Address: randAddr()},
-				{Value: randAmount(), Address: randAddr()},
-				{Value: randAmount(), Address: randAddr()},
-				{Value: randAmount(), Address: randAddr()},
-			},
-		}},
-	}
-	genesisID := b.ID()
-	var state0 ValidationContext
-	update1 := ApplyBlock(state0, b)
+	b := genesisWithBeneficiaries([]sunyata.Beneficiary{
+		{Value: randAmount(), Address: randAddr()},
+		{Value: randAmount(), Address: randAddr()},
+		{Value: randAmount(), Address: randAddr()},
+		{Value: randAmount(), Address: randAddr()},
+		{Value: randAmount(), Address: randAddr()},
+		{Value: randAmount(), Address: randAddr()},
+		{Value: randAmount(), Address: randAddr()},
+		{Value: randAmount(), Address: randAddr()},
+		{Value: randAmount(), Address: randAddr()},
+		{Value: randAmount(), Address: randAddr()},
+		{Value: randAmount(), Address: randAddr()},
+		{Value: randAmount(), Address: randAddr()},
+		{Value: randAmount(), Address: randAddr()},
+	}...)
+	update1 := GenesisUpdate(b, testingDifficulty)
 	origOutputs := update1.NewOutputs
 	if len(origOutputs) != len(b.Transactions[0].Outputs)+1 {
 		t.Fatalf("expected %v new outputs, got %v", len(b.Transactions[0].Outputs)+1, len(origOutputs))
@@ -127,7 +118,7 @@ func TestAccumulator(t *testing.T) {
 	b = sunyata.Block{
 		Header: sunyata.BlockHeader{
 			Height:       b.Header.Height + 1,
-			ParentID:     genesisID,
+			ParentID:     b.ID(),
 			MinerAddress: randAddr(),
 		},
 		Transactions: []sunyata.Transaction{txn},
@@ -274,24 +265,14 @@ func TestAccumulatorRevert(t *testing.T) {
 		}
 		return false
 	}
-
-	b := sunyata.Block{
-		Header: sunyata.BlockHeader{
-			MinerAddress: randAddr(),
-		},
-		Transactions: []sunyata.Transaction{{
-			Outputs: []sunyata.Beneficiary{
-				{Value: randAmount(), Address: randAddr()},
-				{Value: randAmount(), Address: randAddr()},
-				{Value: randAmount(), Address: randAddr()},
-				{Value: randAmount(), Address: randAddr()},
-				{Value: randAmount(), Address: randAddr()},
-			},
-		}},
-	}
-	genesisID := b.ID()
-	var state0 ValidationContext
-	update1 := ApplyBlock(state0, b)
+	b := genesisWithBeneficiaries([]sunyata.Beneficiary{
+		{Value: randAmount(), Address: randAddr()},
+		{Value: randAmount(), Address: randAddr()},
+		{Value: randAmount(), Address: randAddr()},
+		{Value: randAmount(), Address: randAddr()},
+		{Value: randAmount(), Address: randAddr()},
+	}...)
+	update1 := GenesisUpdate(b, testingDifficulty)
 	origOutputs := update1.NewOutputs
 	if len(origOutputs) != len(b.Transactions[0].Outputs)+1 {
 		t.Fatalf("expected %v new outputs, got %v", len(b.Transactions[0].Outputs)+1, len(origOutputs))
@@ -310,7 +291,7 @@ func TestAccumulatorRevert(t *testing.T) {
 	b = sunyata.Block{
 		Header: sunyata.BlockHeader{
 			Height:       b.Header.Height + 1,
-			ParentID:     genesisID,
+			ParentID:     b.ID(),
 			MinerAddress: randAddr(),
 		},
 		Transactions: []sunyata.Transaction{txn},

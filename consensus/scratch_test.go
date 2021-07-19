@@ -1,7 +1,6 @@
 package consensus
 
 import (
-	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/binary"
 	"testing"
@@ -19,41 +18,43 @@ func findBlockNonce(h *sunyata.BlockHeader, target sunyata.BlockID) {
 }
 
 func TestScratchChain(t *testing.T) {
-	privkey := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
-	var pubkey sunyata.PublicKey
-	copy(pubkey[:], privkey[32:])
+	pubkey, privkey := testingKeypair()
 	ourAddr := pubkey.Address()
-	b := sunyata.Block{
-		Header: sunyata.BlockHeader{
-			Timestamp:    time.Unix(734600000, 0),
-			MinerAddress: ourAddr,
-		},
-		Transactions: []sunyata.Transaction{{
-			Outputs: []sunyata.Beneficiary{
-				{Value: sunyata.BaseUnitsPerCoin.Mul64(1), Address: ourAddr},
-				{Value: sunyata.BaseUnitsPerCoin.Mul64(2), Address: ourAddr},
-				{Value: sunyata.BaseUnitsPerCoin.Mul64(3), Address: ourAddr},
-				{Value: sunyata.BaseUnitsPerCoin.Mul64(4), Address: ourAddr},
-				{Value: sunyata.BaseUnitsPerCoin.Mul64(5), Address: ourAddr},
-				{Value: sunyata.BaseUnitsPerCoin.Mul64(6), Address: ourAddr},
-				{Value: sunyata.BaseUnitsPerCoin.Mul64(7), Address: ourAddr},
-				{Value: sunyata.BaseUnitsPerCoin.Mul64(8), Address: ourAddr},
-				{Value: sunyata.BaseUnitsPerCoin.Mul64(9), Address: ourAddr},
-				{Value: sunyata.BaseUnitsPerCoin.Mul64(10), Address: ourAddr},
-				{Value: sunyata.BaseUnitsPerCoin.Mul64(11), Address: ourAddr},
-				{Value: sunyata.BaseUnitsPerCoin.Mul64(12), Address: ourAddr},
-				{Value: sunyata.BaseUnitsPerCoin.Mul64(13), Address: ourAddr},
-			},
-		}},
-	}
-	initialDifficulty := sunyata.Work{NumHashes: [32]byte{31: 1}}
-	findBlockNonce(&b.Header, sunyata.HashRequiringWork(initialDifficulty))
 
-	sau := GenesisUpdate(b, initialDifficulty)
-	origOutputs := sau.NewOutputs
+	b := genesisWithBeneficiaries([]sunyata.Beneficiary{
+		{Value: sunyata.BaseUnitsPerCoin.Mul64(1), Address: ourAddr},
+		{Value: sunyata.BaseUnitsPerCoin.Mul64(2), Address: ourAddr},
+		{Value: sunyata.BaseUnitsPerCoin.Mul64(3), Address: ourAddr},
+		{Value: sunyata.BaseUnitsPerCoin.Mul64(4), Address: ourAddr},
+		{Value: sunyata.BaseUnitsPerCoin.Mul64(5), Address: ourAddr},
+		{Value: sunyata.BaseUnitsPerCoin.Mul64(6), Address: ourAddr},
+		{Value: sunyata.BaseUnitsPerCoin.Mul64(7), Address: ourAddr},
+		{Value: sunyata.BaseUnitsPerCoin.Mul64(8), Address: ourAddr},
+		{Value: sunyata.BaseUnitsPerCoin.Mul64(9), Address: ourAddr},
+		{Value: sunyata.BaseUnitsPerCoin.Mul64(10), Address: ourAddr},
+		{Value: sunyata.BaseUnitsPerCoin.Mul64(11), Address: ourAddr},
+		{Value: sunyata.BaseUnitsPerCoin.Mul64(12), Address: ourAddr},
+		{Value: sunyata.BaseUnitsPerCoin.Mul64(13), Address: ourAddr},
+	}...)
+	sau := GenesisUpdate(b, testingDifficulty)
+	mineBlock := func(txns ...sunyata.Transaction) sunyata.Block {
+		b := sunyata.Block{
+			Header: sunyata.BlockHeader{
+				Height:       b.Header.Height + 1,
+				ParentID:     b.Header.ID(),
+				Timestamp:    b.Header.Timestamp.Add(time.Second),
+				MinerAddress: ourAddr,
+			},
+			Transactions: txns,
+		}
+		b.Header.Commitment = sau.Context.Commitment(b.Header.MinerAddress, b.Transactions)
+		findBlockNonce(&b.Header, sunyata.HashRequiringWork(sau.Context.Difficulty))
+		return b
+	}
 
 	sc := NewScratchChain(sau.Context)
 	var blocks []sunyata.Block
+	origOutputs := sau.NewOutputs
 	toSpend := origOutputs[5:10]
 	var spendTotal sunyata.Currency
 	for _, o := range toSpend {
@@ -72,25 +73,7 @@ func TestScratchChain(t *testing.T) {
 			PublicKey: pubkey,
 		})
 	}
-	sigHash := sau.Context.SigHash(txn)
-	for i := range txn.Inputs {
-		txn.Inputs[i].Signature = sunyata.SignTransaction(privkey, sigHash)
-	}
-
-	mineBlock := func(txns ...sunyata.Transaction) sunyata.Block {
-		b := sunyata.Block{
-			Header: sunyata.BlockHeader{
-				Height:       b.Header.Height + 1,
-				ParentID:     b.Header.ID(),
-				Timestamp:    b.Header.Timestamp.Add(time.Second),
-				MinerAddress: ourAddr,
-			},
-			Transactions: txns,
-		}
-		b.Header.Commitment = sau.Context.Commitment(b.Header.MinerAddress, b.Transactions)
-		findBlockNonce(&b.Header, sunyata.HashRequiringWork(sau.Context.Difficulty))
-		return b
-	}
+	signAllInputs(&txn, sau.Context, privkey)
 
 	b = mineBlock(txn)
 	if err := sc.AppendHeader(b.Header); err != nil {
@@ -113,10 +96,7 @@ func TestScratchChain(t *testing.T) {
 		}},
 		MinerFee: sunyata.BaseUnitsPerCoin,
 	}
-	sigHash = sau.Context.SigHash(txn)
-	for i := range txn.Inputs {
-		txn.Inputs[i].Signature = sunyata.SignTransaction(privkey, sigHash)
-	}
+	signAllInputs(&txn, sau.Context, privkey)
 
 	b = mineBlock(txn)
 	if err := sc.AppendHeader(b.Header); err != nil {
@@ -142,6 +122,7 @@ func TestScratchChain(t *testing.T) {
 			Address: ourAddr,
 		}},
 	}
+	signAllInputs(&parentTxn, sau.Context, privkey)
 	childTxn := sunyata.Transaction{
 		Inputs: []sunyata.Input{{
 			Parent: sunyata.Output{
@@ -161,8 +142,7 @@ func TestScratchChain(t *testing.T) {
 		}},
 		MinerFee: sunyata.BaseUnitsPerCoin,
 	}
-	parentTxn.Inputs[0].Signature = sunyata.SignTransaction(privkey, sau.Context.SigHash(parentTxn))
-	childTxn.Inputs[0].Signature = sunyata.SignTransaction(privkey, sau.Context.SigHash(childTxn))
+	signAllInputs(&childTxn, sau.Context, privkey)
 
 	b = mineBlock(parentTxn, childTxn)
 	if err := sc.AppendHeader(b.Header); err != nil {
