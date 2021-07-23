@@ -274,16 +274,18 @@ func (vc *ValidationContext) ValidateTransaction(txn sunyata.Transaction) error 
 
 func (vc *ValidationContext) validEphemeralOutputs(txns []sunyata.Transaction) error {
 	// TODO: this is rather inefficient. Definitely need a better algorithm.
-	available := make(map[sunyata.OutputID]sunyata.Currency)
+	available := make(map[sunyata.OutputID]sunyata.Beneficiary)
 	for txnIndex, txn := range txns {
 		txid := txn.ID()
 		for _, in := range txn.Inputs {
 			if in.Parent.LeafIndex == sunyata.EphemeralLeafIndex {
 				oid := in.Parent.ID
-				if value, ok := available[oid]; !ok {
+				if out, ok := available[oid]; !ok {
 					return fmt.Errorf("transaction set is invalid: transaction %v claims a non-existent ephemeral output", txnIndex)
-				} else if in.Parent.Value != value {
+				} else if in.Parent.Value != out.Value {
 					return fmt.Errorf("transaction set is invalid: transaction %v claims wrong value for ephemeral output", txnIndex)
+				} else if in.Parent.Address != out.Address {
+					return fmt.Errorf("transaction set is invalid: transaction %v claims wrong address for ephemeral output", txnIndex)
 				}
 				delete(available, oid)
 			}
@@ -293,7 +295,7 @@ func (vc *ValidationContext) validEphemeralOutputs(txns []sunyata.Transaction) e
 				TransactionID:    txid,
 				BeneficiaryIndex: uint64(i),
 			}
-			available[oid] = out.Value
+			available[oid] = out
 		}
 	}
 	return nil
