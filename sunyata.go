@@ -304,6 +304,22 @@ func (h *Hasher) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// WriteByte writes a single byte to the underlying hasher.
+func (h *Hasher) WriteByte(b byte) error {
+	h.buf[0] = b
+	h.h.Write(h.buf[:1])
+	return nil
+}
+
+// WriteBool writes a bool to the underlying hasher.
+func (h *Hasher) WriteBool(b bool) {
+	if b {
+		h.WriteByte(1)
+	} else {
+		h.WriteByte(0)
+	}
+}
+
 // WriteHash writes a generic hash to the underlying hasher.
 func (h *Hasher) WriteHash(p [32]byte) {
 	copy(h.buf[:], p[:])

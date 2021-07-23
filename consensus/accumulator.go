@@ -30,22 +30,19 @@ func merkleNodeHash(left, right sunyata.Hash256) sunyata.Hash256 {
 }
 
 func outputLeafHash(o sunyata.Output, spent bool) sunyata.Hash256 {
-	// TODO: which fields should be hashed?
-	buf := make([]byte, 1+32+8+8+1)
-	n := 0
-	buf[n] = leafHashPrefix
-	n++
-	n += copy(buf[n:], o.ID.TransactionID[:])
-	binary.LittleEndian.PutUint64(buf[n:], o.ID.BeneficiaryIndex)
-	n += 8
-	binary.LittleEndian.PutUint64(buf[n:], o.LeafIndex)
-	n += 8
-	if spent {
-		buf[n] = 0x01
-	} else {
-		buf[n] = 0x00
-	}
-	return sunyata.HashBytes(buf)
+	h := hasherPool.Get().(*sunyata.Hasher)
+	defer hasherPool.Put(h)
+	h.Reset()
+
+	h.WriteByte(leafHashPrefix)
+	h.WriteHash(o.ID.TransactionID)
+	h.WriteUint64(o.ID.BeneficiaryIndex)
+	h.WriteCurrency(o.Value)
+	h.WriteHash(o.Address)
+	h.WriteUint64(o.Timelock)
+	h.WriteUint64(o.LeafIndex)
+	h.WriteBool(spent)
+	return h.Sum()
 }
 
 func outputProofRoot(o sunyata.Output, spent bool) sunyata.Hash256 {
