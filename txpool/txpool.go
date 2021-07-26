@@ -41,8 +41,8 @@ func (p *Pool) validateTransaction(txn sunyata.Transaction) error {
 	for txid, txn := range p.txns {
 		for i := range txn.Outputs {
 			oid := sunyata.OutputID{
-				TransactionID:    txid,
-				BeneficiaryIndex: uint64(i),
+				TransactionID: txid,
+				Index:         uint64(i),
 			}
 			available[oid] = struct{}{}
 		}

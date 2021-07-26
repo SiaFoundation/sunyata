@@ -190,8 +190,8 @@ func TestAccumulator(t *testing.T) {
 		Inputs: []sunyata.Input{{
 			Parent: sunyata.Output{
 				ID: sunyata.OutputID{
-					TransactionID:    parentTxn.ID(),
-					BeneficiaryIndex: 0,
+					TransactionID: parentTxn.ID(),
+					Index:         0,
 				},
 				Value:     randAmount(),
 				Address:   randAddr(),
@@ -384,7 +384,7 @@ func TestMultiproof(t *testing.T) {
 	leaves := make([]sunyata.Hash256, len(outputs))
 	for i := range outputs {
 		outputs[i].LeafIndex = uint64(i)
-		outputs[i].ID.BeneficiaryIndex = uint64(i)
+		outputs[i].ID.Index = uint64(i)
 		leaves[i] = outputLeafHash(outputs[i], false)
 	}
 	node01 := merkleNodeHash(leaves[0], leaves[1])

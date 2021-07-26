@@ -84,8 +84,7 @@ func (vc *ValidationContext) Commitment(minerAddr sunyata.Address, txns []sunyat
 	// this makes it possible to cheaply verify *just* the txns, or *just* the
 	// minerAddr, etc.
 
-	h.WriteUint64(vc.Index.Height)
-	h.WriteHash(vc.Index.ID)
+	h.WriteChainIndex(vc.Index)
 	h.WriteUint64(vc.State.NumLeaves)
 	for i, root := range vc.State.Trees {
 		if vc.State.HasTreeAtHeight(i) {
@@ -109,8 +108,7 @@ func (vc *ValidationContext) Commitment(minerAddr sunyata.Address, txns []sunyat
 	h.Reset()
 	for _, txn := range txns {
 		for _, in := range txn.Inputs {
-			h.WriteHash(in.Parent.ID.TransactionID)
-			h.WriteUint64(in.Parent.ID.BeneficiaryIndex)
+			h.WriteOutputID(in.Parent.ID)
 			h.WriteCurrency(in.Parent.Value)
 			h.WriteHash(in.Parent.Address)
 			h.WriteUint64(in.Parent.Timelock)
@@ -141,9 +139,8 @@ func (vc *ValidationContext) SigHash(txn sunyata.Transaction) sunyata.Hash256 {
 	h := hasherPool.Get().(*sunyata.Hasher)
 	defer hasherPool.Put(h)
 	h.Reset()
-	for i := range txn.Inputs {
-		h.WriteHash(txn.Inputs[i].Parent.ID.TransactionID)
-		h.WriteUint64(txn.Inputs[i].Parent.ID.BeneficiaryIndex)
+	for _, in := range txn.Inputs {
+		h.WriteOutputID(in.Parent.ID)
 	}
 	for i := range txn.Outputs {
 		h.WriteCurrency(txn.Outputs[i].Value)
@@ -292,8 +289,8 @@ func (vc *ValidationContext) validEphemeralOutputs(txns []sunyata.Transaction) e
 		}
 		for i, out := range txn.Outputs {
 			oid := sunyata.OutputID{
-				TransactionID:    txid,
-				BeneficiaryIndex: uint64(i),
+				TransactionID: txid,
+				Index:         uint64(i),
 			}
 			available[oid] = out
 		}

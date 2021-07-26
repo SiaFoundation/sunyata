@@ -127,8 +127,8 @@ func TestScratchChain(t *testing.T) {
 		Inputs: []sunyata.Input{{
 			Parent: sunyata.Output{
 				ID: sunyata.OutputID{
-					TransactionID:    parentTxn.ID(),
-					BeneficiaryIndex: 0,
+					TransactionID: parentTxn.ID(),
+					Index:         0,
 				},
 				Value:     spendTotal,
 				Address:   ourAddr,

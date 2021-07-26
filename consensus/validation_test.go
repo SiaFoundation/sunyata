@@ -52,8 +52,8 @@ func TestEphemeralOutputs(t *testing.T) {
 	signAllInputs(&parentTxn, sau.Context, privkey)
 	ephemeralOutput := sunyata.Output{
 		ID: sunyata.OutputID{
-			TransactionID:    parentTxn.ID(),
-			BeneficiaryIndex: 0,
+			TransactionID: parentTxn.ID(),
+			Index:         0,
 		},
 		Value:     parentTxn.Outputs[0].Value,
 		Address:   pubkey.Address(),

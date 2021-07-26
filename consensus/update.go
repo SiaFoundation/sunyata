@@ -133,8 +133,8 @@ func ApplyBlock(vc ValidationContext, b sunyata.Block) (sau StateApplyUpdate) {
 	sau.NewOutputs = make([]sunyata.Output, 0, numOutputs)
 	sau.NewOutputs = append(sau.NewOutputs, sunyata.Output{
 		ID: sunyata.OutputID{
-			TransactionID:    sunyata.TransactionID(b.ID()),
-			BeneficiaryIndex: 0,
+			TransactionID: sunyata.TransactionID(b.ID()),
+			Index:         0,
 		},
 		Value:    vc.BlockReward(),
 		Address:  b.Header.MinerAddress,
@@ -161,8 +161,8 @@ func ApplyBlock(vc ValidationContext, b sunyata.Block) (sau StateApplyUpdate) {
 		for i, out := range txn.Outputs {
 			sau.NewOutputs = append(sau.NewOutputs, sunyata.Output{
 				ID: sunyata.OutputID{
-					TransactionID:    txid,
-					BeneficiaryIndex: uint64(i),
+					TransactionID: txid,
+					Index:         uint64(i),
 				},
 				Value:    out.Value,
 				Address:  out.Address,

@@ -444,6 +444,20 @@ func (m *msgChainIndex) decodeFrom(b *msgBuffer) {
 	m.ID = b.readHash()
 }
 
+type msgOutputID sunyata.OutputID
+
+const msgOutputIDSize = 32 + 8
+
+func (m *msgOutputID) encodeTo(b *msgBuffer) {
+	b.writeHash(m.TransactionID)
+	b.writeUint64(m.Index)
+}
+
+func (m *msgOutputID) decodeFrom(b *msgBuffer) {
+	m.TransactionID = b.readHash()
+	m.Index = b.readUint64()
+}
+
 type msgBlockHeader sunyata.BlockHeader
 
 const msgBlockHeaderSize = 8 + 32 + 8 + 8 + 32 + 32
@@ -481,8 +495,7 @@ func (m *msgTransaction) encodeTo(b *msgBuffer) {
 	b.writePrefix(len(m.Inputs))
 	for i := range m.Inputs {
 		in := &m.Inputs[i]
-		b.writeHash(in.Parent.ID.TransactionID)
-		b.writeUint64(in.Parent.ID.BeneficiaryIndex)
+		(*msgOutputID)(&in.Parent.ID).encodeTo(b)
 		b.writeCurrency(in.Parent.Value)
 		b.writeHash(in.Parent.Address)
 		b.writeUint64(in.Parent.Timelock)
@@ -505,8 +518,7 @@ func (m *msgTransaction) decodeFrom(b *msgBuffer) {
 	m.Inputs = make([]sunyata.Input, b.readPrefix(minInputSize))
 	for j := range m.Inputs {
 		in := &m.Inputs[j]
-		in.Parent.ID.TransactionID = b.readHash()
-		in.Parent.ID.BeneficiaryIndex = b.readUint64()
+		(*msgOutputID)(&in.Parent.ID).decodeFrom(b)
 		in.Parent.Value = b.readCurrency()
 		in.Parent.Address = b.readHash()
 		in.Parent.Timelock = b.readUint64()

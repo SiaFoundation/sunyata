@@ -35,8 +35,7 @@ func outputLeafHash(o sunyata.Output, spent bool) sunyata.Hash256 {
 	h.Reset()
 
 	h.WriteByte(leafHashPrefix)
-	h.WriteHash(o.ID.TransactionID)
-	h.WriteUint64(o.ID.BeneficiaryIndex)
+	h.WriteOutputID(o.ID)
 	h.WriteCurrency(o.Value)
 	h.WriteHash(o.Address)
 	h.WriteUint64(o.Timelock)

@@ -66,8 +66,8 @@ type TransactionID Hash256
 
 // An OutputID uniquely identifies an Output.
 type OutputID struct {
-	TransactionID    TransactionID
-	BeneficiaryIndex uint64
+	TransactionID TransactionID
+	Index         uint64
 }
 
 // An Output is a volume of currency that is created and spent as an atomic
@@ -127,7 +127,7 @@ func (txn *Transaction) ID() TransactionID {
 	// transaction
 	for i := range txn.Inputs {
 		h.WriteHash(txn.Inputs[i].Parent.ID.TransactionID)
-		h.WriteUint64(txn.Inputs[i].Parent.ID.BeneficiaryIndex)
+		h.WriteUint64(txn.Inputs[i].Parent.ID.Index)
 	}
 	for i := range txn.Outputs {
 		h.WriteCurrency(txn.Outputs[i].Value)
@@ -342,6 +342,20 @@ func (h *Hasher) WriteCurrency(c Currency) {
 	binary.LittleEndian.PutUint64(h.buf[:8], c.Lo)
 	binary.LittleEndian.PutUint64(h.buf[8:], c.Hi)
 	h.h.Write(h.buf[:16])
+}
+
+// WriteChainIndex writes a ChainIndex value to the underlying hasher.
+func (h *Hasher) WriteChainIndex(index ChainIndex) {
+	binary.LittleEndian.PutUint64(h.buf[:8], index.Height)
+	copy(h.buf[8:], index.ID[:])
+	h.h.Write(h.buf[:40])
+}
+
+// WriteOutputID writes an OutputID value to the underlying hasher.
+func (h *Hasher) WriteOutputID(id OutputID) {
+	copy(h.buf[:32], id.TransactionID[:])
+	binary.LittleEndian.PutUint64(h.buf[32:], id.Index)
+	h.h.Write(h.buf[:40])
 }
 
 // Sum returns the hash of the data written to the underlying hasher.

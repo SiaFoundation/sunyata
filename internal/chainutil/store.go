@@ -459,6 +459,10 @@ func writeCheckpoint(w io.Writer, c consensus.Checkpoint) error {
 		writeUint64(c.Lo)
 		writeUint64(c.Hi)
 	}
+	writeOutputID := func(id sunyata.OutputID) {
+		writeHash(id.TransactionID)
+		writeUint64(id.Index)
+	}
 
 	// write header
 	h := c.Block.Header
@@ -475,8 +479,7 @@ func writeCheckpoint(w io.Writer, c consensus.Checkpoint) error {
 		writeInt(len(txn.Inputs))
 		for j := range txn.Inputs {
 			in := &txn.Inputs[j]
-			writeHash(in.Parent.ID.TransactionID)
-			writeUint64(in.Parent.ID.BeneficiaryIndex)
+			writeOutputID(in.Parent.ID)
 			writeCurrency(in.Parent.Value)
 			writeHash(in.Parent.Address)
 			writeUint64(in.Parent.Timelock)
@@ -553,6 +556,12 @@ func readCheckpoint(r io.Reader, c *consensus.Checkpoint) error {
 	readCurrency := func() (c sunyata.Currency) {
 		return sunyata.NewCurrency(readUint64(), readUint64())
 	}
+	readOutputID := func() sunyata.OutputID {
+		return sunyata.OutputID{
+			TransactionID: readHash(),
+			Index:         readUint64(),
+		}
+	}
 
 	// read header
 	h := &c.Block.Header
@@ -570,8 +579,7 @@ func readCheckpoint(r io.Reader, c *consensus.Checkpoint) error {
 		txn.Inputs = make([]sunyata.Input, readUint64())
 		for j := range txn.Inputs {
 			in := &txn.Inputs[j]
-			in.Parent.ID.TransactionID = readHash()
-			in.Parent.ID.BeneficiaryIndex = readUint64()
+			in.Parent.ID = readOutputID()
 			in.Parent.Value = readCurrency()
 			in.Parent.Address = readHash()
 			in.Parent.Timelock = readUint64()
