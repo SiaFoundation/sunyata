@@ -114,7 +114,7 @@ outer:
 	for id, txn := range p.txns {
 		// if any of the inputs were spent, the txn is now invalid; delete it
 		for i := range txn.Inputs {
-			if cau.OutputWasSpent(txn.Inputs[i].Parent.LeafIndex) {
+			if cau.OutputWasSpent(txn.Inputs[i].Parent) {
 				delete(p.txns, id)
 				continue outer
 			}
@@ -158,7 +158,7 @@ outer:
 	for id, txn := range p.txns {
 		// if any of the inputs no longer exist, the txn is now invalid; delete it
 		for i := range txn.Inputs {
-			if cru.OutputWasRemoved(txn.Inputs[i].Parent.LeafIndex) {
+			if cru.OutputWasRemoved(txn.Inputs[i].Parent) {
 				delete(p.txns, id)
 				continue outer
 			}

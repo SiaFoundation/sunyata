@@ -196,7 +196,7 @@ func TestScratchChainDifficultyAdjustment(t *testing.T) {
 	}
 	b.Header.Commitment = vc.Commitment(sunyata.VoidAddress, b.Transactions)
 	for sunyata.WorkRequiredForHash(b.ID()).Cmp(currentDifficulty) >= 0 {
-		findBlockNonce(&b.Header, sunyata.HashRequiringWork(vc.Difficulty))
+		rand.Read(b.Header.Nonce[:])
 	}
 	if err := sc.AppendHeader(b.Header); err == nil {
 		t.Fatal("expected block to be rejected")

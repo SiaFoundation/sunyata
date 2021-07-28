@@ -7,72 +7,6 @@ import (
 	"go.sia.tech/sunyata"
 )
 
-// A StateApplyUpdate reflects the changes to consensus state resulting from the
-// application of a block.
-type StateApplyUpdate struct {
-	Context      ValidationContext
-	NewOutputs   []sunyata.Output
-	spentOutputs [64][]sunyata.Output
-	treeGrowth   [64][]sunyata.Hash256
-}
-
-// OutputWasSpent returns true if the output with the given leaf index was
-// spent.
-func (sau *StateApplyUpdate) OutputWasSpent(leafIndex uint64) bool {
-	for i := range sau.spentOutputs {
-		for _, so := range sau.spentOutputs[i] {
-			if so.LeafIndex == leafIndex {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// UpdateOutputProof updates the Merkle proof of the supplied output to
-// incorporate the changes made to the state tree. The output's proof must be
-// up-to-date; if it is not, UpdateOutputProof may panic.
-func (sau *StateApplyUpdate) UpdateOutputProof(o *sunyata.Output) {
-	// A state update can affect an output proof in two ways. First, if an
-	// output within the same tree as o was spent, then all of the proof hashes
-	// above the "merge point" of o and the spent output will change. Second, if
-	// new outputs were added to the Forest, then o may now be within a larger
-	// tree, so its proof must be extended to reach the root of this tree.
-
-	// Update the proof to reflect the spent output leaves. What we really care
-	// about is the spent output "closest" to ours (where "closest" means the
-	// lowest mergeHeight). If we have that output, we can simply copy over all
-	// the hashes above their mergeHeight. We'll also need the root of the
-	// sibling subtree immediately *prior* to the merge point. Lastly, we need
-	// to handle the case where o itself was spent. In that case, we can copy
-	// over the entire proof, and there is no subtree prior to the merge point
-	// to compute (since the mergeHeight will be 0).
-	if spentInTree := sau.spentOutputs[len(o.MerkleProof)]; len(spentInTree) > 0 {
-		// find the closest spent output
-		best := spentInTree[0]
-		bestMergeHeight := mergeHeight(o.LeafIndex, best.LeafIndex)
-		for _, so := range spentInTree[1:] {
-			if mh := mergeHeight(o.LeafIndex, so.LeafIndex); mh < bestMergeHeight {
-				best, bestMergeHeight = so, mh
-			}
-		}
-		if best.LeafIndex == o.LeafIndex {
-			// o was spent; copy over the entire updated proof
-			copy(o.MerkleProof, best.MerkleProof)
-		} else {
-			// o was not spent; copy everything above the mergeHeight, then
-			// compute the root prior to the mergeHeight. We can do this by
-			// artificially truncating the spent output's proof, and then
-			// calling ProofRoot.
-			copy(o.MerkleProof[bestMergeHeight:], best.MerkleProof[bestMergeHeight:])
-			best.MerkleProof = best.MerkleProof[:bestMergeHeight-1]
-			o.MerkleProof[bestMergeHeight-1] = outputProofRoot(best, true)
-		}
-	}
-	// Update the proof to incorporate the "growth" of the tree it was in.
-	o.MerkleProof = append(o.MerkleProof, sau.treeGrowth[len(o.MerkleProof)]...)
-}
-
 // BlockInterval is the expected wall clock time between consecutive blocks.
 const BlockInterval = 10 * time.Minute
 
@@ -117,21 +51,40 @@ func applyHeader(vc ValidationContext, h sunyata.BlockHeader) ValidationContext 
 	return vc
 }
 
-// ApplyBlock integrates a block into the current consensus state, producing
-// a StateApplyUpdate detailing the resulting changes. The block is assumed to
-// be fully validated.
-func ApplyBlock(vc ValidationContext, b sunyata.Block) (sau StateApplyUpdate) {
-	sau.Context = applyHeader(vc, b.Header)
-
-	sau.spentOutputs = sau.Context.State.markInputsSpent(b.Transactions)
-
-	// create block reward output
-	numOutputs := 1
-	for i := range b.Transactions {
-		numOutputs += len(b.Transactions[i].Outputs)
+func updatedInBlock(vc ValidationContext, b sunyata.Block) (outputs []sunyata.Output, objects []stateObject) {
+	addObject := func(so stateObject) {
+		// copy proofs so we don't mutate transaction data
+		so.proof = append([]sunyata.Hash256(nil), so.proof...)
+		objects = append(objects, so)
 	}
-	sau.NewOutputs = make([]sunyata.Output, 0, numOutputs)
-	sau.NewOutputs = append(sau.NewOutputs, sunyata.Output{
+
+	for _, txn := range b.Transactions {
+		for _, in := range txn.Inputs {
+			outputs = append(outputs, in.Parent)
+			if in.Parent.LeafIndex != sunyata.EphemeralLeafIndex {
+				addObject(outputStateObject(in.Parent, flagSpent))
+			}
+		}
+	}
+
+	return
+}
+
+func createdInBlock(vc ValidationContext, b sunyata.Block) (outputs []sunyata.Output, objects []stateObject) {
+	flags := make(map[sunyata.OutputID]uint64)
+	for _, txn := range b.Transactions {
+		for _, in := range txn.Inputs {
+			if in.Parent.LeafIndex == sunyata.EphemeralLeafIndex {
+				flags[in.Parent.ID] = flagSpent
+			}
+		}
+	}
+	addOutput := func(o sunyata.Output) {
+		outputs = append(outputs, o)
+		objects = append(objects, outputStateObject(o, flags[o.ID]))
+	}
+
+	addOutput(sunyata.Output{
 		ID: sunyata.OutputID{
 			TransactionID: sunyata.TransactionID(b.ID()),
 			Index:         0,
@@ -140,26 +93,10 @@ func ApplyBlock(vc ValidationContext, b sunyata.Block) (sau StateApplyUpdate) {
 		Address:  b.Header.MinerAddress,
 		Timelock: vc.BlockRewardTimelock(),
 	})
-
-	// locate ephemeral outputs
-	spentMap := make(map[sunyata.OutputID]struct{})
-	for _, txn := range b.Transactions {
-		for _, in := range txn.Inputs {
-			if in.Parent.LeafIndex == sunyata.EphemeralLeafIndex {
-				spentMap[in.Parent.ID] = struct{}{}
-			}
-		}
-	}
-	wasSpent := func(oid sunyata.OutputID) bool {
-		_, ok := spentMap[oid]
-		return ok
-	}
-
-	// create transaction outputs
 	for _, txn := range b.Transactions {
 		txid := txn.ID()
 		for i, out := range txn.Outputs {
-			sau.NewOutputs = append(sau.NewOutputs, sunyata.Output{
+			addOutput(sunyata.Output{
 				ID: sunyata.OutputID{
 					TransactionID: txid,
 					Index:         uint64(i),
@@ -171,8 +108,55 @@ func ApplyBlock(vc ValidationContext, b sunyata.Block) (sau StateApplyUpdate) {
 		}
 	}
 
-	// compute Merkle proofs for each new output
-	sau.treeGrowth = sau.Context.State.addNewOutputs(sau.NewOutputs, wasSpent)
+	return
+}
+
+// A StateApplyUpdate reflects the changes to consensus state resulting from the
+// application of a block.
+type StateApplyUpdate struct {
+	Context        ValidationContext
+	SpentOutputs   []sunyata.Output
+	NewOutputs     []sunyata.Output
+	updatedObjects [64][]stateObject
+	treeGrowth     [64][]sunyata.Hash256
+}
+
+// OutputWasSpent returns true if the given Output was spent.
+func (sau *StateApplyUpdate) OutputWasSpent(o sunyata.Output) bool {
+	for i := range sau.SpentOutputs {
+		if sau.SpentOutputs[i].LeafIndex == o.LeafIndex {
+			return true
+		}
+	}
+	return false
+}
+
+// UpdateOutputProof updates the Merkle proof of the supplied output to
+// incorporate the changes made to the state tree. The output's proof must be
+// up-to-date; if it is not, UpdateOutputProof may panic.
+func (sau *StateApplyUpdate) UpdateOutputProof(o *sunyata.Output) {
+	updateProof(o.MerkleProof, o.LeafIndex, &sau.updatedObjects)
+	o.MerkleProof = append(o.MerkleProof, sau.treeGrowth[len(o.MerkleProof)]...)
+}
+
+// ApplyBlock integrates a block into the current consensus state, producing
+// a StateApplyUpdate detailing the resulting changes. The block is assumed to
+// be fully validated.
+func ApplyBlock(vc ValidationContext, b sunyata.Block) (sau StateApplyUpdate) {
+	sau.Context = applyHeader(vc, b.Header)
+
+	var updated, created []stateObject
+	sau.SpentOutputs, updated = updatedInBlock(vc, b)
+	sau.NewOutputs, created = createdInBlock(vc, b)
+
+	sau.updatedObjects = sau.Context.State.updateExistingObjects(updated)
+	sau.treeGrowth = sau.Context.State.addNewObjects(created)
+	for i := range sau.NewOutputs {
+		sau.NewOutputs[i].LeafIndex = created[0].leafIndex
+		sau.NewOutputs[i].MerkleProof = created[0].proof
+		created = created[1:]
+	}
+
 	return
 }
 
@@ -187,75 +171,33 @@ func GenesisUpdate(b sunyata.Block, initialDifficulty sunyata.Work) StateApplyUp
 // A StateRevertUpdate reflects the changes to consensus state resulting from the
 // removal of a block.
 type StateRevertUpdate struct {
-	Context    ValidationContext
-	NewOutputs []sunyata.Output
+	Context        ValidationContext
+	SpentOutputs   []sunyata.Output
+	NewOutputs     []sunyata.Output
+	updatedObjects [64][]stateObject
 }
 
-// OutputWasRemoved returns true if the Output with the specified index was
-// reverted.
-func (sru *StateRevertUpdate) OutputWasRemoved(leafIndex uint64) bool {
-	return leafIndex >= sru.Context.State.NumLeaves
+// OutputWasRemoved returns true if the specified Output was reverted.
+func (sru *StateRevertUpdate) OutputWasRemoved(o sunyata.Output) bool {
+	return o.LeafIndex >= sru.Context.State.NumLeaves
 }
 
 // UpdateOutputProof updates the Merkle proof of the supplied output to
 // incorporate the changes made to the state tree. The output's proof must be
 // up-to-date; if it is not, UpdateOutputProof may panic.
 func (sru *StateRevertUpdate) UpdateOutputProof(o *sunyata.Output) {
-	// The algorithm here is, unsurprisingly, the inverse of
-	// (StateApplyUpdate).UpdateOutputProof. First we trim off any hashes that
-	// were appended by treeGrowth when we applied. Then we find the closest
-	// NewOutput and copy its proof hashes above the mergeHeight.
-	//
-	// The structure is slightly different because StateRevertUpdate only has
-	// NewOutputs, unlike StateApplyUpdate which has spentOutputs. This may
-	// change in the future.
-	trim := mergeHeight(sru.Context.State.NumLeaves, o.LeafIndex) - 1
-	if trim < len(o.MerkleProof) {
-		o.MerkleProof = o.MerkleProof[:trim]
+	if mh := mergeHeight(sru.Context.State.NumLeaves, o.LeafIndex); mh <= len(o.MerkleProof) {
+		o.MerkleProof = o.MerkleProof[:mh-1]
 	}
-	if len(sru.NewOutputs) == 0 {
-		return
-	}
-	// locate closest NewOutput and copy its proof
-	best := sru.NewOutputs[0]
-	bestMergeHeight := mergeHeight(o.LeafIndex, best.LeafIndex)
-	for _, so := range sru.NewOutputs[1:] {
-		if mh := mergeHeight(o.LeafIndex, so.LeafIndex); mh < bestMergeHeight {
-			best, bestMergeHeight = so, mh
-		}
-	}
-	if bestMergeHeight > len(o.MerkleProof) {
-		return // no NewOutput in same tree as o, so nothing to change
-	}
-	if best.LeafIndex == o.LeafIndex {
-		// o was un-spent; copy over the entire updated proof
-		copy(o.MerkleProof, best.MerkleProof)
-	} else {
-		// o was not un-spent; copy everything above the mergeHeight, then
-		// compute the root prior to the mergeHeight. We can do this by
-		// artificially truncating the spent output's proof, and then calling
-		// ProofRoot.
-		copy(o.MerkleProof[bestMergeHeight:], best.MerkleProof[bestMergeHeight:])
-		best.MerkleProof = best.MerkleProof[:bestMergeHeight-1]
-		o.MerkleProof[bestMergeHeight-1] = outputProofRoot(best, false)
-	}
+	updateProof(o.MerkleProof, o.LeafIndex, &sru.updatedObjects)
 }
 
 // RevertBlock produces a StateRevertUpdate from a block and the
 // ValidationContext prior to that block.
-func RevertBlock(vc ValidationContext, b sunyata.Block) StateRevertUpdate {
-	var numOutputs int
-	for i := range b.Transactions {
-		numOutputs += len(b.Transactions[i].Inputs)
-	}
-	newOutputs := make([]sunyata.Output, 0, numOutputs)
-	for _, txn := range b.Transactions {
-		for _, in := range txn.Inputs {
-			newOutputs = append(newOutputs, in.Parent)
-		}
-	}
-	return StateRevertUpdate{
-		Context:    vc,
-		NewOutputs: newOutputs,
-	}
+func RevertBlock(vc ValidationContext, b sunyata.Block) (sru StateRevertUpdate) {
+	sru.Context = vc
+	sru.SpentOutputs, _ = updatedInBlock(vc, b)
+	sru.NewOutputs, _ = createdInBlock(vc, b)
+	sru.updatedObjects = objectsByTree(b.Transactions)
+	return
 }

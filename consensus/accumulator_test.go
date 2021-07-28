@@ -60,15 +60,8 @@ func TestAccumulator(t *testing.T) {
 			binary.LittleEndian.Uint64(b[8:]),
 		)
 	}
-	containsOutput := func(sa StateAccumulator, o sunyata.Output, spent bool) bool {
-		root := outputProofRoot(o, spent)
-		start, end := bits.TrailingZeros64(sa.NumLeaves), bits.Len64(sa.NumLeaves)
-		for i := start; i < end; i++ {
-			if sa.HasTreeAtHeight(i) && sa.Trees[i] == root {
-				return true
-			}
-		}
-		return false
+	containsOutput := func(sa StateAccumulator, o sunyata.Output, flags uint64) bool {
+		return sa.containsObject(outputStateObject(o, flags))
 	}
 
 	b := genesisWithBeneficiaries([]sunyata.Beneficiary{
@@ -93,10 +86,10 @@ func TestAccumulator(t *testing.T) {
 	}
 	// none of the outputs should be marked as spent
 	for _, o := range origOutputs {
-		if update1.OutputWasSpent(o.LeafIndex) {
+		if update1.OutputWasSpent(o) {
 			t.Error("update should not mark output as spent:", o)
 		}
-		if containsOutput(update1.Context.State, o, true) || !containsOutput(update1.Context.State, o, false) {
+		if containsOutput(update1.Context.State, o, flagSpent) || !containsOutput(update1.Context.State, o, 0) {
 			t.Error("accumulator should contain unspent output:", o)
 		}
 	}
@@ -131,18 +124,18 @@ func TestAccumulator(t *testing.T) {
 
 	// the update should mark each input as spent
 	for _, in := range txn.Inputs {
-		if !update2.OutputWasSpent(in.Parent.LeafIndex) {
+		if !update2.OutputWasSpent(in.Parent) {
 			t.Error("update should mark input as spent:", in)
 		}
 	}
 	// the new accumulator should contain both the spent and unspent outputs
 	for _, o := range origOutputs {
-		if update2.OutputWasSpent(o.LeafIndex) {
-			if containsOutput(update2.Context.State, o, false) || !containsOutput(update2.Context.State, o, true) {
+		if update2.OutputWasSpent(o) {
+			if containsOutput(update2.Context.State, o, 0) || !containsOutput(update2.Context.State, o, flagSpent) {
 				t.Error("accumulator should contain spent output:", o)
 			}
 		} else {
-			if containsOutput(update2.Context.State, o, true) || !containsOutput(update2.Context.State, o, false) {
+			if containsOutput(update2.Context.State, o, flagSpent) || !containsOutput(update2.Context.State, o, 0) {
 				t.Error("accumulator should contain unspent output:", o)
 			}
 		}
@@ -151,11 +144,11 @@ func TestAccumulator(t *testing.T) {
 	// if we reverted that block, we should see the inputs being "created" again
 	// and the outputs being destroyed
 	revertUpdate := RevertBlock(update1.Context, b)
-	if len(revertUpdate.NewOutputs) != len(txn.Inputs) {
-		t.Error("number of new outputs after revert should equal number of inputs spent")
+	if len(revertUpdate.SpentOutputs) != len(txn.Inputs) {
+		t.Error("number of spent outputs after revert should equal number of inputs")
 	}
 	for _, o := range update2.NewOutputs {
-		if !revertUpdate.OutputWasRemoved(o.LeafIndex) {
+		if !revertUpdate.OutputWasRemoved(o) {
 			t.Error("output created in reverted block should be marked as removed")
 		}
 	}
@@ -167,10 +160,10 @@ func TestAccumulator(t *testing.T) {
 	}
 	// the reverted proofs should be identical to the proofs prior to b
 	for _, o := range outputsWithRevert {
-		if update1.OutputWasSpent(o.LeafIndex) {
+		if update1.OutputWasSpent(o) {
 			t.Error("update should not mark output as spent:", o)
 		}
-		if containsOutput(update1.Context.State, o, true) {
+		if containsOutput(update1.Context.State, o, flagSpent) {
 			t.Error("output should not be marked as spent:", o)
 		}
 	}
@@ -221,18 +214,18 @@ func TestAccumulator(t *testing.T) {
 
 	// the update should mark each input as spent
 	for _, in := range parentTxn.Inputs {
-		if !update3.OutputWasSpent(in.Parent.LeafIndex) {
+		if !update3.OutputWasSpent(in.Parent) {
 			t.Error("update should mark input as spent:", in)
 		}
 	}
 	// the new accumulator should contain both the spent and unspent outputs
 	for _, o := range origOutputs {
-		if update2.OutputWasSpent(o.LeafIndex) || update3.OutputWasSpent(o.LeafIndex) {
-			if containsOutput(update3.Context.State, o, false) || !containsOutput(update3.Context.State, o, true) {
+		if update2.OutputWasSpent(o) || update3.OutputWasSpent(o) {
+			if containsOutput(update3.Context.State, o, 0) || !containsOutput(update3.Context.State, o, flagSpent) {
 				t.Error("accumulator should contain spent output:", o)
 			}
 		} else {
-			if containsOutput(update3.Context.State, o, true) || !containsOutput(update3.Context.State, o, false) {
+			if containsOutput(update3.Context.State, o, flagSpent) || !containsOutput(update3.Context.State, o, 0) {
 				t.Error("accumulator should contain unspent output:", o)
 			}
 		}
@@ -255,15 +248,8 @@ func TestAccumulatorRevert(t *testing.T) {
 			binary.LittleEndian.Uint64(b[8:]),
 		)
 	}
-	containsOutput := func(sa StateAccumulator, o sunyata.Output, spent bool) bool {
-		root := outputProofRoot(o, spent)
-		start, end := bits.TrailingZeros64(sa.NumLeaves), bits.Len64(sa.NumLeaves)
-		for i := start; i < end; i++ {
-			if sa.HasTreeAtHeight(i) && sa.Trees[i] == root {
-				return true
-			}
-		}
-		return false
+	containsOutput := func(sa StateAccumulator, o sunyata.Output, flags uint64) bool {
+		return sa.containsObject(outputStateObject(o, flags))
 	}
 	b := genesisWithBeneficiaries([]sunyata.Beneficiary{
 		{Value: randAmount(), Address: randAddr()},
@@ -305,11 +291,11 @@ func TestAccumulatorRevert(t *testing.T) {
 	// revert the block. We should see the inputs being "created" again
 	// and the outputs being destroyed
 	revertUpdate := RevertBlock(update1.Context, b)
-	if len(revertUpdate.NewOutputs) != len(txn.Inputs) {
-		t.Error("number of new outputs after revert should equal number of inputs spent")
+	if len(revertUpdate.SpentOutputs) != len(txn.Inputs) {
+		t.Error("number of spent outputs after revert should equal number of inputs")
 	}
 	for _, o := range update2.NewOutputs {
-		if !revertUpdate.OutputWasRemoved(o.LeafIndex) {
+		if !revertUpdate.OutputWasRemoved(o) {
 			t.Error("output created in reverted block should be marked as removed")
 		}
 	}
@@ -319,39 +305,42 @@ func TestAccumulatorRevert(t *testing.T) {
 	}
 	// the reverted proofs should be identical to the proofs prior to b
 	for _, o := range origOutputs {
-		if update1.OutputWasSpent(o.LeafIndex) {
+		if update1.OutputWasSpent(o) {
 			t.Error("update should not mark output as spent:", o)
 		}
-		if !containsOutput(update1.Context.State, o, false) {
+		if !containsOutput(update1.Context.State, o, 0) {
 			t.Error("output should be in the accumulator, marked as unspent:", o)
 		}
 	}
 }
 
-func TestMarkInputsSpent(t *testing.T) {
+func TestUpdateExistingObjects(t *testing.T) {
 	outputs := make([]sunyata.Output, 8)
+	objects := make([]stateObject, len(outputs))
 	for i := range outputs {
-		outputs[i].LeafIndex = uint64(i)
+		objects[i] = outputStateObject(outputs[i], 0)
 	}
 	var acc StateAccumulator
-	acc.addNewOutputs(outputs, func(sunyata.OutputID) bool { return false })
+	acc.addNewObjects(objects)
+	for i := range outputs {
+		outputs[i].LeafIndex = objects[i].leafIndex
+		outputs[i].MerkleProof = objects[i].proof
+	}
 
-	txns := []sunyata.Transaction{{
-		Inputs: []sunyata.Input{
-			{Parent: outputs[0]},
-			{Parent: outputs[2]},
-			{Parent: outputs[3]},
-			{Parent: outputs[5]},
-			{Parent: outputs[6]},
-		},
-	}}
+	updated := []stateObject{
+		outputStateObject(outputs[0], flagSpent),
+		outputStateObject(outputs[2], flagSpent),
+		outputStateObject(outputs[3], flagSpent),
+		outputStateObject(outputs[5], flagSpent),
+		outputStateObject(outputs[6], flagSpent),
+	}
 
-	acc.markInputsSpent(txns)
+	acc.updateExistingObjects(updated)
 
 	var acc2 StateAccumulator
-	addOutput := func(o sunyata.Output, spent bool) {
+	addOutput := func(o sunyata.Output, flags uint64) {
 		// seek to first open slot, merging nodes as we go
-		root := outputLeafHash(o, spent)
+		root := outputStateObject(o, flags).leafHash()
 		i := 0
 		for ; acc2.HasTreeAtHeight(i); i++ {
 			root = merkleNodeHash(acc2.Trees[i], root)
@@ -362,9 +351,9 @@ func TestMarkInputsSpent(t *testing.T) {
 	for i, o := range outputs {
 		switch i {
 		case 0, 2, 3, 5, 6:
-			addOutput(o, true)
+			addOutput(o, flagSpent)
 		default:
-			addOutput(o, false)
+			addOutput(o, 0)
 		}
 	}
 	for i := range acc2.Trees {
@@ -385,7 +374,7 @@ func TestMultiproof(t *testing.T) {
 	for i := range outputs {
 		outputs[i].LeafIndex = uint64(i)
 		outputs[i].ID.Index = uint64(i)
-		leaves[i] = outputLeafHash(outputs[i], false)
+		leaves[i] = outputStateObject(outputs[i], 0).leafHash()
 	}
 	node01 := merkleNodeHash(leaves[0], leaves[1])
 	node23 := merkleNodeHash(leaves[2], leaves[3])
@@ -448,11 +437,10 @@ func TestMultiproof(t *testing.T) {
 	}
 }
 
-func BenchmarkOutputLeaf(b *testing.B) {
+func BenchmarkOutputLeafHash(b *testing.B) {
 	var o sunyata.Output
-	o.MerkleProof = make([]sunyata.Hash256, 25)
 	for i := 0; i < b.N; i++ {
-		outputProofRoot(o, true)
+		outputStateObject(o, 0).leafHash()
 	}
 }
 
@@ -472,23 +460,27 @@ func BenchmarkApplyBlock(b *testing.B) {
 	}
 }
 
-func BenchmarkMarkInputs(b *testing.B) {
+func BenchmarkUpdateExistingObjects(b *testing.B) {
 	outputs := make([]sunyata.Output, 1000)
+	objects := make([]stateObject, len(outputs))
 	for i := range outputs {
-		outputs[i].LeafIndex = uint64(i)
+		objects[i] = outputStateObject(outputs[i], 0)
 	}
 	var acc StateAccumulator
-	acc.addNewOutputs(outputs, func(sunyata.OutputID) bool { return false })
+	acc.addNewObjects(objects)
+	for i := range outputs {
+		outputs[i].LeafIndex = objects[i].leafIndex
+		outputs[i].MerkleProof = objects[i].proof
+	}
+
 	proofs := make([][]sunyata.Hash256, len(outputs))
 	for i := range proofs {
 		proofs[i] = append([]sunyata.Hash256(nil), outputs[i].MerkleProof...)
 	}
 	indices := rand.Perm(len(outputs))[:len(outputs)/2]
-	txns := []sunyata.Transaction{{
-		Inputs: make([]sunyata.Input, len(indices)),
-	}}
+	updated := make([]stateObject, len(indices))
 	for i, j := range indices {
-		txns[0].Inputs[i].Parent = outputs[j]
+		updated[i] = outputStateObject(outputs[j], flagSpent)
 	}
 
 	b.ResetTimer()
@@ -498,10 +490,10 @@ func BenchmarkMarkInputs(b *testing.B) {
 		b.StopTimer()
 		acc2 := acc
 		for i, j := range indices {
-			copy(txns[0].Inputs[i].Parent.MerkleProof, proofs[j])
+			copy(updated[i].proof, proofs[j])
 		}
 		b.StartTimer()
 
-		acc2.markInputsSpent(txns)
+		acc2.updateExistingObjects(updated)
 	}
 }

@@ -86,7 +86,7 @@ func (s *EphemeralStore) ProcessChainApplyUpdate(cau *chain.ApplyUpdate, _ bool)
 	// delete spent outputs
 	remOutputs := s.outputs[:0]
 	for _, o := range s.outputs {
-		if !cau.OutputWasSpent(o.LeafIndex) {
+		if !cau.OutputWasSpent(o) {
 			remOutputs = append(remOutputs, o)
 		}
 	}
@@ -142,14 +142,14 @@ func (s *EphemeralStore) ProcessChainRevertUpdate(cru *chain.RevertUpdate) error
 	// delete removed outputs
 	remOutputs := s.outputs[:0]
 	for _, o := range s.outputs {
-		if !cru.OutputWasRemoved(o.LeafIndex) {
+		if !cru.OutputWasRemoved(o) {
 			remOutputs = append(remOutputs, o)
 		}
 	}
 	s.outputs = remOutputs
 
-	// add un-spent outputs
-	for _, o := range cru.NewOutputs {
+	// re-add outputs that were spent in the reverted block
+	for _, o := range cru.SpentOutputs {
 		if _, ok := s.addrs[o.Address]; ok {
 			o.MerkleProof = append([]sunyata.Hash256(nil), o.MerkleProof...)
 			s.outputs = append(s.outputs, o)
