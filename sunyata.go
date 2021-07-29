@@ -254,9 +254,9 @@ func WorkRequiredForHash(id BlockID) Work {
 	// TODO: write a zero-alloc uint256 division instead of using big.Int
 	maxTarget := new(big.Int).Lsh(big.NewInt(1), 256)
 	idInt := new(big.Int).SetBytes(id[:])
-	quo := maxTarget.Div(maxTarget, idInt).Bytes()
+	quo := maxTarget.Div(maxTarget, idInt)
 	var w Work
-	copy(w.NumHashes[32-len(quo):], quo)
+	quo.FillBytes(w.NumHashes[:])
 	return w
 }
 
@@ -277,9 +277,9 @@ func HashRequiringWork(w Work) BlockID {
 	}
 	maxTarget := new(big.Int).Lsh(big.NewInt(1), 256)
 	workInt := new(big.Int).SetBytes(w.NumHashes[:])
-	quo := maxTarget.Div(maxTarget, workInt).Bytes()
+	quo := maxTarget.Div(maxTarget, workInt)
 	var id BlockID
-	copy(id[32-len(quo):], quo)
+	quo.FillBytes(id[:])
 	return id
 }
 
