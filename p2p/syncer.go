@@ -276,6 +276,7 @@ func (s *Syncer) syncToTarget(p *Peer, target sunyata.ChainIndex) {
 		if len(headers) == 0 {
 			return
 		}
+
 		sc, err := s.cm.AddHeaders(headers)
 		if errors.Is(err, chain.ErrUnknownIndex) {
 			// NOTE: attempting to synchronize again would be a bad idea: it could
@@ -291,89 +292,92 @@ func (s *Syncer) syncToTarget(p *Peer, target sunyata.ChainIndex) {
 			continue
 		}
 
-		// we now have a new best chain, assuming its transaction are valid;
-		// request those transactions
-		for !sc.FullyValidated() {
-			unvalidated := sc.Unvalidated()
+		// create circular buffer
+		chunks := make([][]sunyata.Block, 8)
 
-			chunks := len(unvalidated) / BlocksPerRequest
-			if len(unvalidated)%BlocksPerRequest != 0 {
-				chunks++
-			}
-			unaddedChunks := make([][]sunyata.Block, chunks)
-
-			var chunkMu sync.Mutex
-			var wg sync.WaitGroup
-			wg.Add(chunks)
-			s.cond.L.Unlock()
-			for i := 0; i < chunks; i++ {
-				go func(chunkIndex int) {
-					defer wg.Done()
-
-					// download in chunks of 16 (BlocksPerRequest)
-					begin := chunkIndex * BlocksPerRequest
-					end := begin + BlocksPerRequest
-					if end > len(unvalidated) {
-						end = len(unvalidated)
-					}
-
+		// spawn workers
+		type req struct {
+			chunkIndex int
+			blocks     []sunyata.ChainIndex
+		}
+		type resp struct {
+			chunkIndex int
+			blocks     []sunyata.Block
+		}
+		reqChan := make(chan req, len(chunks))
+		respChan := make(chan resp, len(chunks))
+		for i := range chunks {
+			go func(i int) {
+				for req := range reqChan {
 				download:
-					// get peer here (right before RPC request) instead of
-					// before the goroutine so that we don't accidentally
-					// connect to a disconnected peer in the event of an error
-					s.cond.L.Lock()
 					if len(s.peers) == 0 {
-						// ran out of peers due to errors?
-						s.cond.L.Unlock()
 						return
 					}
-					p := s.peers[chunkIndex%len(s.peers)]
-					s.cond.L.Unlock()
+					p := s.peers[i%len(s.peers)]
 
-					blocks, err := getBlocks(p, unvalidated[begin:end])
+					blocks, err := getBlocks(p, req.blocks)
 					if err != nil {
-						// getBlocks disconnects peers that error so
-						// we do not need any special error handling logic here
-						// other than retrying because there's nothing we can
-						// really do other than try again
 						goto download
 					}
-
-					chunkMu.Lock()
-					unaddedChunks[chunkIndex] = blocks
-					for i, chunk := range unaddedChunks {
-						if len(chunk) == 0 {
-							continue
-						}
-						// make a new scratch chain
-						// if the blocks are adjacent then there should be no
-						// error and we will replace the current scratch chain
-						// (sc) with newSc
-						newSc, err := s.cm.AddBlocks(chunk)
-						if err == nil {
-							sc = newSc
-							// remove this chunk from memory now that it has
-							// been added
-							unaddedChunks[i] = nil
-						} else if i == chunkIndex && !errors.Is(err, chain.ErrUnknownIndex) {
-							// if we have an error for the chunk we just downloaded
-							// and it's not just an error caused by the fact that
-							// we haven't downloaded the previous blocks yet
-							p.disconnect()
-							chunkMu.Unlock()
-							goto download
-						}
+					// call getBlocks and send response down respChan
+					respChan <- resp{
+						chunkIndex: req.chunkIndex,
+						blocks:     blocks,
 					}
-					chunkMu.Unlock()
-				}(i)
+				}
+			}(i)
+		}
+
+		// send initial requests
+		unvalidated := sc.Unvalidated()
+
+		for i := range chunks {
+			begin := i * BlocksPerRequest
+			if begin >= len(unvalidated) {
+				break
 			}
-			wg.Wait()
-			s.cond.L.Lock()
+			end := begin + BlocksPerRequest
+			if end > len(unvalidated) {
+				end = len(unvalidated)
+			}
+			reqChan <- req{
+				chunkIndex: i,
+				blocks:     unvalidated[begin:end],
+			}
 		}
-		// if we reached the target index, we're done; otherwise, request more headers
-		if sc.Contains(target) {
-			return
+
+		// process responses and send more requests as needed
+		cur := 0
+		curAbs := 0
+		for !sc.FullyValidated() {
+			r := <-respChan
+			if r.chunkIndex < curAbs {
+				continue
+			}
+			chunks[r.chunkIndex%len(chunks)] = r.blocks
+
+			// drain as much of the buffer as we can
+			for chunks[cur] != nil {
+				sc, err = s.cm.AddBlocks(chunks[cur])
+				chunks[cur] = nil
+				cur = (cur + 1) % len(chunks)
+				curAbs++
+			}
+
+			if !sc.FullyValidated() {
+				begin := curAbs * BlocksPerRequest
+				end := begin + BlocksPerRequest
+				if end > len(unvalidated) {
+					end = len(unvalidated)
+				}
+				reqChan <- req{
+					chunkIndex: curAbs,
+					blocks:     unvalidated[begin:end],
+				}
+			}
 		}
+		close(reqChan)
+
 		history = []sunyata.ChainIndex{sc.ValidTip()}
 	}
 }
