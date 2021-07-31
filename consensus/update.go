@@ -36,16 +36,27 @@ func adjustDifficulty(w sunyata.Work, interval time.Duration) sunyata.Work {
 }
 
 func applyHeader(vc ValidationContext, h sunyata.BlockHeader) ValidationContext {
+	if h.Height == 0 {
+		// special handling for GenesisUpdate
+		vc.LastAdjust = h.Timestamp
+		vc.PrevTimestamps[0] = h.Timestamp
+		vc.History.AppendLeaf(h.Index())
+		vc.Index = h.Index()
+		return vc
+	}
+
 	blockWork := sunyata.WorkRequiredForHash(h.ID())
 	if h.Height > 0 && h.Height%DifficultyAdjustmentInterval == 0 {
 		vc.Difficulty = adjustDifficulty(vc.Difficulty, h.Timestamp.Sub(vc.LastAdjust))
 		vc.LastAdjust = h.Timestamp
 	}
 	vc.TotalWork = vc.TotalWork.Add(blockWork)
-	if vc.numTimestamps() == len(vc.PrevTimestamps) {
+	if vc.numTimestamps() < len(vc.PrevTimestamps) {
+		vc.PrevTimestamps[vc.numTimestamps()] = h.Timestamp
+	} else {
 		copy(vc.PrevTimestamps[:], vc.PrevTimestamps[1:])
+		vc.PrevTimestamps[len(vc.PrevTimestamps)-1] = h.Timestamp
 	}
-	vc.PrevTimestamps[vc.numTimestamps()-1] = h.Timestamp
 	vc.Index = h.Index()
 	vc.History.AppendLeaf(vc.Index)
 	return vc
@@ -164,7 +175,6 @@ func ApplyBlock(vc ValidationContext, b sunyata.Block) (sau StateApplyUpdate) {
 func GenesisUpdate(b sunyata.Block, initialDifficulty sunyata.Work) StateApplyUpdate {
 	return ApplyBlock(ValidationContext{
 		Difficulty: initialDifficulty,
-		LastAdjust: b.Header.Timestamp,
 	}, b)
 }
 
