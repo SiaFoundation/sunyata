@@ -40,25 +40,65 @@ func (m *Miner) Stats() (mined int, rate float64) {
 	return m.mined, m.rate
 }
 
+func (m *Miner) txnsForBlock() (blockTxns []sunyata.Transaction) {
+	poolTxns := make(map[sunyata.TransactionID]sunyata.Transaction)
+	for _, txn := range m.tp.Transactions() {
+		poolTxns[txn.ID()] = txn
+	}
+
+	// define a helper function that returns the unmet dependencies of a given
+	// transaction
+	calcDeps := func(txn sunyata.Transaction) (deps []sunyata.Transaction) {
+		added := make(map[sunyata.TransactionID]bool)
+		var addDeps func(txn sunyata.Transaction)
+		addDeps = func(txn sunyata.Transaction) {
+			added[txn.ID()] = true
+			for _, in := range txn.Inputs {
+				parentID := in.Parent.ID.TransactionID
+				if parent, inPool := poolTxns[parentID]; inPool && !added[parentID] {
+					// NOTE: important that we add the parent's deps before the
+					// parent itself
+					addDeps(parent)
+					deps = append(deps, parent)
+				}
+			}
+			return
+		}
+		addDeps(txn)
+		return
+	}
+
+	capacity := m.vc.MaxBlockWeight()
+	for _, txn := range poolTxns {
+		// prepend the txn with its dependencies
+		group := append(calcDeps(txn), txn)
+		// if the weight of the group exceeds the remaining capacity of the
+		// block, skip it
+		groupWeight := m.vc.BlockWeight(group)
+		if groupWeight > capacity {
+			continue
+		}
+		// add the group to the block
+		blockTxns = append(blockTxns, group...)
+		capacity -= groupWeight
+		for _, txn := range group {
+			delete(poolTxns, txn.ID())
+		}
+	}
+
+	return
+}
+
 // MineBlock mines a valid block, using transactions drawn from the txpool.
 func (m *Miner) MineBlock() sunyata.Block {
 	for {
 		// TODO: if the miner and txpool don't have the same tip, we'll
 		// construct an invalid block
-		txns := m.tp.Transactions()
-
 		m.mu.Lock()
-		var weight uint64
-		for i := range txns {
-			weight += m.vc.TransactionWeight(txns[i])
-			if weight > m.vc.MaxBlockWeight() {
-				txns = txns[:i]
-				break
-			}
-		}
 		parent := m.vc.Index
 		target := sunyata.HashRequiringWork(m.vc.Difficulty)
 		addr := m.addr
+		txns := m.txnsForBlock()
 		commitment := m.vc.Commitment(addr, txns)
 		m.mu.Unlock()
 		b := sunyata.Block{
