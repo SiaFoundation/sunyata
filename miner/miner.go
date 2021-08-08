@@ -40,25 +40,63 @@ func (m *Miner) Stats() (mined int, rate float64) {
 	return m.mined, m.rate
 }
 
+func (m *Miner) transactions() (transactions []sunyata.Transaction) {
+	txns := make(map[sunyata.TransactionID]sunyata.Transaction)
+	for _, txn := range m.tp.Transactions() {
+		txns[txn.ID()] = txn
+	}
+
+	// dependencies returns all parents of a transaction.
+	var dependencies func(txn sunyata.Transaction, dependsOn map[sunyata.TransactionID]bool) (deps []sunyata.Transaction, weight uint64)
+	dependencies = func(txn sunyata.Transaction, dependsOn map[sunyata.TransactionID]bool) (deps []sunyata.Transaction, weight uint64) {
+		for _, in := range txn.Inputs {
+			parent, exists := txns[in.Parent.ID.TransactionID]
+			if !exists || dependsOn[in.Parent.ID.TransactionID] {
+				continue
+			}
+
+			p, w := dependencies(parent, dependsOn)
+			weight += w
+			deps = append(deps, p...)
+		}
+
+		dependsOn[txn.ID()] = true
+		deps = append(deps, txn)
+		weight += m.vc.TransactionWeight(txn)
+		return
+	}
+
+	var total uint64
+	for _, txn := range txns {
+		// get the parents of this transaction and calculate the weight.
+		deps, weight := dependencies(txn, make(map[sunyata.TransactionID]bool))
+		// if the total weight of this group is greater than the block's max
+		// weight discard this transaction.
+		if total+weight > m.vc.MaxBlockWeight() {
+			continue
+		}
+		// remove all transactions in the group from the map of transactions and
+		// add them to the block.
+		for _, txn := range deps {
+			delete(txns, txn.ID())
+		}
+		total += weight
+		transactions = append(transactions, deps...)
+	}
+
+	return
+}
+
 // MineBlock mines a valid block, using transactions drawn from the txpool.
 func (m *Miner) MineBlock() sunyata.Block {
 	for {
 		// TODO: if the miner and txpool don't have the same tip, we'll
 		// construct an invalid block
-		txns := m.tp.Transactions()
-
 		m.mu.Lock()
-		var weight uint64
-		for i := range txns {
-			weight += m.vc.TransactionWeight(txns[i])
-			if weight > m.vc.MaxBlockWeight() {
-				txns = txns[:i]
-				break
-			}
-		}
 		parent := m.vc.Index
 		target := sunyata.HashRequiringWork(m.vc.Difficulty)
 		addr := m.addr
+		txns := m.transactions()
 		commitment := m.vc.Commitment(addr, txns)
 		m.mu.Unlock()
 		b := sunyata.Block{
