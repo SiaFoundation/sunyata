@@ -36,19 +36,17 @@ func TestSyncer(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// give n1 a chain
 	sim.MineBlocks(5)
-	_ = testPeerResponse(t, n1.s, &MsgHeaders{
-		Headers: chainutil.JustHeaders(sim.Chain),
-	})
-	_ = testPeerResponse(t, n1.s, &MsgBlocks{
-		Blocks: sim.Chain,
-	})
+	// give n1 a chain
+	for _, b := range sim.Chain {
+		if err := n1.c.AddTipBlock(b); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	// relay just the tip to n2; it should request the rest
 	b := sim.Chain[len(sim.Chain)-1]
 	n1.s.Broadcast(&MsgRelayBlock{b})
-
 	time.Sleep(500 * time.Millisecond)
 	if n1.c.Tip() != n2.c.Tip() {
 		t.Fatal("peers did not sync:", n1.c.Tip(), n2.c.Tip())
@@ -58,7 +56,6 @@ func TestSyncer(t *testing.T) {
 	oldTip := n1.c.Tip()
 	b = sim.Chain[len(sim.Chain)-2]
 	n1.s.Broadcast(&MsgRelayBlock{b})
-
 	time.Sleep(500 * time.Millisecond)
 	if n1.c.Tip() != oldTip || n2.c.Tip() != oldTip {
 		t.Fatalf("tip went backwards (expected: %v): %v %v", oldTip, n1.c.Tip(), n2.c.Tip())
@@ -74,7 +71,6 @@ func TestSyncer(t *testing.T) {
 	if n1.c.Tip() != oldTip || n2.c.Tip() != oldTip {
 		t.Fatalf("accepted invalid tip (expected: %v): %v %v", oldTip, n1.c.Tip(), n2.c.Tip())
 	}
-
 }
 
 func TestMsgGetHeaders(t *testing.T) {

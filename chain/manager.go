@@ -264,21 +264,21 @@ func (m *Manager) AddBlocks(blocks []sunyata.Block) (*consensus.ScratchChain, er
 	if len(blocks) == 0 {
 		return nil, nil
 	}
-	index := blocks[0].Index()
+	base, tip := blocks[0].Index(), blocks[len(blocks)-1].Index()
 	var chain *consensus.ScratchChain
 	for _, sc := range m.chains {
-		if !sc.FullyValidated() && sc.ValidTip().Height >= (index.Height-1) && sc.Contains(index) {
+		if sc.Contains(tip) && base.Height-1 <= sc.ValidTip().Height && sc.ValidTip().Height < tip.Height {
 			chain = sc
 			break
 		}
 	}
 	if chain == nil {
-		return nil, fmt.Errorf("index %v does not attach to any known chain: %w", index, ErrUnknownIndex)
+		return nil, fmt.Errorf("blocks %v...%v do not extend any known chain: %w", base, tip, ErrUnknownIndex)
 	}
 
 	// the chain may already contain some of the supplied blocks; ignore
 	// the ones we already have
-	have := chain.ValidTip().Height - (index.Height - 1)
+	have := chain.ValidTip().Height - (base.Height - 1)
 	blocks = blocks[have:]
 
 	for _, b := range blocks {
