@@ -1,27 +1,38 @@
 package consensus
 
 import (
-	"crypto/rand"
-	"encoding/binary"
 	"testing"
 	"time"
 
 	"go.sia.tech/sunyata"
 )
 
-// copied from testutil (can't import due to cycle)
-func findBlockNonce(h *sunyata.BlockHeader, target sunyata.BlockID) {
-	rand.Read(h.Nonce[:])
+// copied from chainutil (can't import due to cycle)
+func findBlockNonce(sc State, h *sunyata.BlockHeader, target sunyata.BlockID) {
 	for !h.ID().MeetsTarget(target) {
-		binary.LittleEndian.PutUint64(h.Nonce[:], binary.LittleEndian.Uint64(h.Nonce[:])+1)
+		h.Nonce++
 	}
 }
 
+func mineBlock(s State, parent sunyata.Block, txns ...sunyata.Transaction) sunyata.Block {
+	b := sunyata.Block{
+		Header: sunyata.BlockHeader{
+			Height:    parent.Header.Height + 1,
+			ParentID:  parent.Header.ID(),
+			Timestamp: parent.Header.Timestamp.Add(time.Second),
+		},
+		Transactions: txns,
+	}
+	b.Header.Commitment = s.Commitment(b.Header.MinerAddress, b.Transactions)
+	findBlockNonce(s, &b.Header, sunyata.HashRequiringWork(s.Difficulty))
+	return b
+}
+
 func TestScratchChain(t *testing.T) {
-	pubkey, privkey := testingKeypair()
+	pubkey, privkey := testingKeypair(0)
 	ourAddr := pubkey.Address()
 
-	b := genesisWithBeneficiaries([]sunyata.Beneficiary{
+	b := genesisWithOutputs([]sunyata.Output{
 		{Value: sunyata.BaseUnitsPerCoin.Mul64(1), Address: ourAddr},
 		{Value: sunyata.BaseUnitsPerCoin.Mul64(2), Address: ourAddr},
 		{Value: sunyata.BaseUnitsPerCoin.Mul64(3), Address: ourAddr},
@@ -37,35 +48,28 @@ func TestScratchChain(t *testing.T) {
 		{Value: sunyata.BaseUnitsPerCoin.Mul64(13), Address: ourAddr},
 	}...)
 	sau := GenesisUpdate(b, testingDifficulty)
-	mineBlock := func(txns ...sunyata.Transaction) sunyata.Block {
-		b := sunyata.Block{
-			Header: sunyata.BlockHeader{
-				Height:       b.Header.Height + 1,
-				ParentID:     b.Header.ID(),
-				Timestamp:    b.Header.Timestamp.Add(time.Second),
-				MinerAddress: ourAddr,
-			},
-			Transactions: txns,
-		}
-		b.Header.Commitment = sau.Context.Commitment(b.Header.MinerAddress, b.Transactions)
-		findBlockNonce(&b.Header, sunyata.HashRequiringWork(sau.Context.Difficulty))
-		return b
-	}
 
-	sc := NewScratchChain(sau.Context)
+	sc := NewScratchChain(sau.State)
+	if sc.Base() != sau.State.Index {
+		t.Fatal("wrong base:", sc.Base())
+	} else if sc.Tip() != sau.State.Index {
+		t.Fatal("wrong tip:", sc.Tip())
+	} else if sc.UnvalidatedBase() != sau.State.Index {
+		t.Fatal("wrong unvalidated base:", sc.UnvalidatedBase())
+	}
 	var blocks []sunyata.Block
-	origOutputs := sau.NewOutputs
+	origOutputs := sau.NewOutputElements
 	toSpend := origOutputs[5:10]
 	var spendTotal sunyata.Currency
 	for _, o := range toSpend {
 		spendTotal = spendTotal.Add(o.Value)
 	}
 	txn := sunyata.Transaction{
-		Outputs: []sunyata.Beneficiary{{
-			Value:   spendTotal.Sub(sunyata.BaseUnitsPerCoin),
+		Outputs: []sunyata.Output{{
+			Value:   spendTotal.Sub(sunyata.BaseUnitsPerCoin.Mul64(1)),
 			Address: ourAddr,
 		}},
-		MinerFee: sunyata.BaseUnitsPerCoin,
+		MinerFee: sunyata.BaseUnitsPerCoin.Mul64(1),
 	}
 	for _, o := range toSpend {
 		txn.Inputs = append(txn.Inputs, sunyata.Input{
@@ -73,39 +77,51 @@ func TestScratchChain(t *testing.T) {
 			PublicKey: pubkey,
 		})
 	}
-	signAllInputs(&txn, sau.Context, privkey)
+	signAllInputs(&txn, sau.State, privkey)
 
-	b = mineBlock(txn)
-	if err := sc.AppendHeader(b.Header); err != nil {
+	b = mineBlock(sau.State, b, txn)
+	if sc.Contains(b.Index()) {
+		t.Fatal("scratch chain should not contain the header yet")
+	} else if _, err := sc.ApplyBlock(b); err == nil {
+		t.Fatal("shouldn't be able to apply a block without a corresponding header")
+	} else if err := sc.AppendHeader(b.Header); err != nil {
 		t.Fatal(err)
+	} else if sc.Tip() != b.Index() {
+		t.Fatal("wrong tip:", sc.Tip())
+	} else if sc.UnvalidatedBase() != sc.Base() {
+		t.Fatal("wrong unvalidated base:", sc.UnvalidatedBase())
+	} else if !sc.Contains(b.Index()) {
+		t.Fatal("scratch chain should contain the header")
+	} else if sc.TotalWork() != testingDifficulty {
+		t.Fatal("wrong total work:", sc.TotalWork())
 	}
 	blocks = append(blocks, b)
 
-	sau = ApplyBlock(sau.Context, b)
-	sau.UpdateOutputProof(&origOutputs[2])
-	newOutputs := sau.NewOutputs
+	sau = ApplyBlock(sau.State, b)
+	sau.UpdateElementProof(&origOutputs[2].StateElement)
+	newOutputs := sau.NewOutputElements
 
 	txn = sunyata.Transaction{
 		Inputs: []sunyata.Input{{
 			Parent:    newOutputs[1],
 			PublicKey: pubkey,
 		}},
-		Outputs: []sunyata.Beneficiary{{
-			Value:   newOutputs[1].Value.Sub(sunyata.BaseUnitsPerCoin),
+		Outputs: []sunyata.Output{{
+			Value:   newOutputs[1].Value.Sub(sunyata.BaseUnitsPerCoin.Mul64(1)),
 			Address: ourAddr,
 		}},
-		MinerFee: sunyata.BaseUnitsPerCoin,
+		MinerFee: sunyata.BaseUnitsPerCoin.Mul64(1),
 	}
-	signAllInputs(&txn, sau.Context, privkey)
+	signAllInputs(&txn, sau.State, privkey)
 
-	b = mineBlock(txn)
+	b = mineBlock(sau.State, b, txn)
 	if err := sc.AppendHeader(b.Header); err != nil {
 		t.Fatal(err)
 	}
 	blocks = append(blocks, b)
-	sau = ApplyBlock(sau.Context, b)
+	sau = ApplyBlock(sau.State, b)
 	for i := range origOutputs {
-		sau.UpdateOutputProof(&origOutputs[i])
+		sau.UpdateElementProof(&origOutputs[i].StateElement)
 	}
 	toSpend = origOutputs[2:3]
 	spendTotal = sunyata.ZeroCurrency
@@ -117,122 +133,110 @@ func TestScratchChain(t *testing.T) {
 			Parent:    toSpend[0],
 			PublicKey: pubkey,
 		}},
-		Outputs: []sunyata.Beneficiary{{
+		Outputs: []sunyata.Output{{
 			Value:   spendTotal,
 			Address: ourAddr,
 		}},
 	}
-	signAllInputs(&parentTxn, sau.Context, privkey)
+	signAllInputs(&parentTxn, sau.State, privkey)
 	childTxn := sunyata.Transaction{
 		Inputs: []sunyata.Input{{
-			Parent: sunyata.Output{
-				ID: sunyata.OutputID{
-					TransactionID: parentTxn.ID(),
-					Index:         0,
+			Parent: sunyata.OutputElement{
+				StateElement: sunyata.StateElement{
+					ID: sunyata.ElementID{
+						Source: sunyata.Hash256(parentTxn.ID()),
+						Index:  0,
+					},
+					LeafIndex: sunyata.EphemeralLeafIndex,
 				},
-				Value:     spendTotal,
-				Address:   ourAddr,
-				LeafIndex: sunyata.EphemeralLeafIndex,
+				Output: sunyata.Output{
+					Value:   spendTotal,
+					Address: ourAddr,
+				},
 			},
 			PublicKey: pubkey,
 		}},
-		Outputs: []sunyata.Beneficiary{{
-			Value:   spendTotal.Sub(sunyata.BaseUnitsPerCoin),
+		Outputs: []sunyata.Output{{
+			Value:   spendTotal.Sub(sunyata.BaseUnitsPerCoin.Mul64(1)),
 			Address: ourAddr,
 		}},
-		MinerFee: sunyata.BaseUnitsPerCoin,
+		MinerFee: sunyata.BaseUnitsPerCoin.Mul64(1),
 	}
-	signAllInputs(&childTxn, sau.Context, privkey)
+	signAllInputs(&childTxn, sau.State, privkey)
 
-	b = mineBlock(parentTxn, childTxn)
+	b = mineBlock(sau.State, b, parentTxn, childTxn)
 	if err := sc.AppendHeader(b.Header); err != nil {
 		t.Fatal(err)
 	}
 	blocks = append(blocks, b)
 
+	// should have one unvalidated header for each block
+	if sc.FullyValidated() {
+		t.Fatal("scratch chain should not be fully validated yet")
+	} else if len(sc.Unvalidated()) != len(blocks) {
+		t.Fatal("unvalidated headers not equal to blocks")
+	}
+	for i, index := range sc.Unvalidated() {
+		if index != blocks[i].Index() {
+			t.Fatal("unvalidated header not equal to block")
+		} else if sc.Index(index.Height) != index {
+			t.Fatal("inconsistent index:", sc.Index(index.Height), index)
+		}
+	}
+
 	// validate all blocks
 	for _, b := range blocks {
 		if _, err := sc.ApplyBlock(b); err != nil {
 			t.Fatal(err)
+		} else if sc.ValidTip() != b.Index() {
+			t.Fatal("wrong valid tip:", sc.ValidTip())
+		} else if len(sc.Unvalidated()) > 0 && sc.UnvalidatedBase() != sc.Index(b.Header.Height+1) {
+			t.Fatal("wrong unvalidated base:", sc.UnvalidatedBase())
 		}
+	}
+	if !sc.FullyValidated() {
+		t.Fatal("scratch chain should be fully validated")
+	} else if len(sc.Unvalidated()) != 0 {
+		t.Fatal("scratch chain should not have any unvalidated headers")
 	}
 }
 
 func TestScratchChainDifficultyAdjustment(t *testing.T) {
-	var b sunyata.Block
-	b.Header.Timestamp = time.Unix(734600000, 0)
-	initialDifficulty := sunyata.Work{NumHashes: [32]byte{31: 4}}
-	vc := GenesisUpdate(b, initialDifficulty).Context
+	b := genesisWithOutputs()
+	b.Header.Height = (State{}).DifficultyAdjustmentInterval() - 1
+	s := GenesisUpdate(b, testingDifficulty).State
 
-	// mine enough blocks to trigger adjustment
-	sc := NewScratchChain(vc)
-	for i := 0; i < DifficultyAdjustmentInterval; i++ {
-		b.Header = sunyata.BlockHeader{
-			Height:    b.Header.Height + 1,
-			ParentID:  b.Header.ID(),
-			Timestamp: b.Header.Timestamp.Add(time.Second),
-		}
-		b.Header.Commitment = vc.Commitment(sunyata.VoidAddress, b.Transactions)
-		findBlockNonce(&b.Header, sunyata.HashRequiringWork(vc.Difficulty))
-		if err := sc.AppendHeader(b.Header); err != nil {
-			t.Fatal(err)
-		} else if _, err := sc.ApplyBlock(b); err != nil {
-			t.Fatal(err)
-		}
-		vc = ApplyBlock(vc, b).Context
-	}
-
-	// difficulty should have changed
-	currentDifficulty := sc.tvc.Difficulty
-	if currentDifficulty.Cmp(initialDifficulty) <= 0 {
-		t.Fatal("difficulty should have increased")
-	}
-
-	// mine a block with less than the minimum work; it should be rejected
-	b.Header = sunyata.BlockHeader{
-		Height:    b.Header.Height + 1,
-		ParentID:  b.Header.ID(),
-		Timestamp: b.Header.Timestamp.Add(time.Second),
-	}
-	b.Header.Commitment = vc.Commitment(sunyata.VoidAddress, b.Transactions)
-	for sunyata.WorkRequiredForHash(b.ID()).Cmp(currentDifficulty) >= 0 {
-		rand.Read(b.Header.Nonce[:])
-	}
-	if err := sc.AppendHeader(b.Header); err == nil {
-		t.Fatal("expected block to be rejected")
-	}
-	vc = ApplyBlock(vc, b).Context
-
-	// mine at actual difficulty
-	findBlockNonce(&b.Header, sunyata.HashRequiringWork(currentDifficulty))
+	// skip ahead to next adjustment and mine a block
+	sc := NewScratchChain(s)
+	b = mineBlock(s, b)
 	if err := sc.AppendHeader(b.Header); err != nil {
 		t.Fatal(err)
 	} else if _, err := sc.ApplyBlock(b); err != nil {
 		t.Fatal(err)
 	}
-	vc = ApplyBlock(vc, b).Context
-}
+	s = ApplyBlock(s, b).State
 
-func TestAdjustDifficulty(t *testing.T) {
-	w := sunyata.Work{NumHashes: [32]byte{31: 100}}
-	twice := adjustDifficulty(w, BlockInterval*DifficultyAdjustmentInterval/2)
-	if twice.String() != "200" {
-		t.Errorf("expected 200, got %v", twice.String())
+	// difficulty should have changed
+	currentDifficulty := sc.ts.Difficulty
+	if currentDifficulty.Cmp(testingDifficulty) <= 0 {
+		t.Fatal("difficulty should have increased")
 	}
-	half := adjustDifficulty(w, BlockInterval*DifficultyAdjustmentInterval*2)
-	if half.String() != "50" {
-		t.Errorf("expected 50, got %v", half.String())
+
+	// mine a block with less than the minimum work; it should be rejected
+	b = mineBlock(s, b)
+	for sunyata.WorkRequiredForHash(b.ID()).Cmp(currentDifficulty) >= 0 {
+		b.Header.Nonce++
 	}
-	third := adjustDifficulty(w, BlockInterval*DifficultyAdjustmentInterval*3)
-	if third.String() != "33" {
-		t.Errorf("expected 33, got %v", third.String())
+	if err := sc.AppendHeader(b.Header); err == nil {
+		t.Fatal("expected block to be rejected")
 	}
-	max := adjustDifficulty(w, BlockInterval*DifficultyAdjustmentInterval/100)
-	if max.String() != "400" {
-		t.Errorf("expected 400, got %v", max.String())
+
+	// mine at actual difficulty
+	findBlockNonce(s, &b.Header, sunyata.HashRequiringWork(s.Difficulty))
+	if err := sc.AppendHeader(b.Header); err != nil {
+		t.Fatal(err)
+	} else if _, err := sc.ApplyBlock(b); err != nil {
+		t.Fatal(err)
 	}
-	min := adjustDifficulty(w, BlockInterval*DifficultyAdjustmentInterval*100)
-	if min.String() != "25" {
-		t.Errorf("expected 25, got %v", min.String())
-	}
+	s = ApplyBlock(s, b).State
 }

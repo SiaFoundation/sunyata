@@ -1,120 +1,87 @@
 package consensus
 
 import (
-	"math/big"
 	"time"
 
 	"go.sia.tech/sunyata"
+	"go.sia.tech/sunyata/merkle"
 )
 
-// BlockInterval is the expected wall clock time between consecutive blocks.
-const BlockInterval = 10 * time.Minute
-
-// DifficultyAdjustmentInterval is the number of blocks between adjustments to
-// the block mining target.
-const DifficultyAdjustmentInterval = 2016
-
-func adjustDifficulty(w sunyata.Work, interval time.Duration) sunyata.Work {
-	if interval.Round(time.Second) != interval {
-		// developer error; interval should be the difference between two Unix
-		// timestamps
-		panic("interval not rounded to nearest second")
+func adjustDifficulty(s *State, h sunyata.BlockHeader) sunyata.Work {
+	expectedDelta := s.BlockInterval() * time.Duration(s.DifficultyAdjustmentInterval())
+	actualDelta := h.Timestamp.Sub(s.LastAdjust)
+	if actualDelta > expectedDelta*4 {
+		actualDelta = expectedDelta * 4
+	} else if actualDelta < expectedDelta/4 {
+		actualDelta = expectedDelta / 4
 	}
-	const maxInterval = BlockInterval * DifficultyAdjustmentInterval * 4
-	const minInterval = BlockInterval * DifficultyAdjustmentInterval / 4
-	if interval > maxInterval {
-		interval = maxInterval
-	} else if interval < minInterval {
-		interval = minInterval
-	}
-	workInt := new(big.Int).SetBytes(w.NumHashes[:])
-	workInt.Mul(workInt, big.NewInt(int64(BlockInterval*DifficultyAdjustmentInterval)))
-	workInt.Div(workInt, big.NewInt(int64(interval)))
-	quo := workInt.Bytes()
-	copy(w.NumHashes[32-len(quo):], quo)
-	return w
+	return s.Difficulty.Mul64(uint64(expectedDelta)).Div64(uint64(actualDelta))
 }
 
-func applyHeader(vc ValidationContext, h sunyata.BlockHeader) ValidationContext {
+func applyHeader(s *State, h sunyata.BlockHeader) {
 	if h.Height == 0 {
 		// special handling for GenesisUpdate
-		vc.LastAdjust = h.Timestamp
-		vc.PrevTimestamps[0] = h.Timestamp
-		vc.History.AppendLeaf(h.Index())
-		vc.Index = h.Index()
-		return vc
+		s.PrevTimestamps[0] = h.Timestamp
+		s.Index = h.Index()
+		return
 	}
-
-	blockWork := sunyata.WorkRequiredForHash(h.ID())
-	if h.Height > 0 && h.Height%DifficultyAdjustmentInterval == 0 {
-		vc.Difficulty = adjustDifficulty(vc.Difficulty, h.Timestamp.Sub(vc.LastAdjust))
-		vc.LastAdjust = h.Timestamp
+	s.TotalWork = s.TotalWork.Add(s.Difficulty)
+	if h.Height%s.DifficultyAdjustmentInterval() == 0 {
+		s.Difficulty = adjustDifficulty(s, h)
+		s.LastAdjust = h.Timestamp
 	}
-	vc.TotalWork = vc.TotalWork.Add(blockWork)
-	if vc.numTimestamps() < len(vc.PrevTimestamps) {
-		vc.PrevTimestamps[vc.numTimestamps()] = h.Timestamp
+	if s.numTimestamps() < len(s.PrevTimestamps) {
+		s.PrevTimestamps[s.numTimestamps()] = h.Timestamp
 	} else {
-		copy(vc.PrevTimestamps[:], vc.PrevTimestamps[1:])
-		vc.PrevTimestamps[len(vc.PrevTimestamps)-1] = h.Timestamp
+		copy(s.PrevTimestamps[:], s.PrevTimestamps[1:])
+		s.PrevTimestamps[len(s.PrevTimestamps)-1] = h.Timestamp
 	}
-	vc.Index = h.Index()
-	vc.History.AppendLeaf(vc.Index)
-	return vc
+	s.Index = h.Index()
 }
 
-func updatedInBlock(vc ValidationContext, b sunyata.Block) (outputs []sunyata.Output, objects []stateObject) {
-	addObject := func(so stateObject) {
-		// copy proofs so we don't mutate transaction data
-		so.proof = append([]sunyata.Hash256(nil), so.proof...)
-		objects = append(objects, so)
-	}
-
+func updatedInBlock(s State, b sunyata.Block, apply bool) (oes []sunyata.OutputElement, leaves []merkle.ElementLeaf) {
 	for _, txn := range b.Transactions {
 		for _, in := range txn.Inputs {
-			outputs = append(outputs, in.Parent)
 			if in.Parent.LeafIndex != sunyata.EphemeralLeafIndex {
-				addObject(outputStateObject(in.Parent, flagSpent))
+				oes = append(oes, in.Parent)
+				l := merkle.OutputLeaf(in.Parent, apply)
+				// copy proofs so we don't mutate transaction data
+				l.MerkleProof = append([]sunyata.Hash256(nil), l.MerkleProof...)
+				leaves = append(leaves, l)
 			}
 		}
 	}
-
 	return
 }
 
-func createdInBlock(vc ValidationContext, b sunyata.Block) (outputs []sunyata.Output, objects []stateObject) {
-	flags := make(map[sunyata.OutputID]uint64)
-	for _, txn := range b.Transactions {
-		for _, in := range txn.Inputs {
-			if in.Parent.LeafIndex == sunyata.EphemeralLeafIndex {
-				flags[in.Parent.ID] = flagSpent
-			}
-		}
-	}
-	addOutput := func(o sunyata.Output) {
-		outputs = append(outputs, o)
-		objects = append(objects, outputStateObject(o, flags[o.ID]))
-	}
-
-	addOutput(sunyata.Output{
-		ID: sunyata.OutputID{
-			TransactionID: sunyata.TransactionID(b.ID()),
-			Index:         0,
+func createdInBlock(s State, b sunyata.Block) (oes []sunyata.OutputElement) {
+	oes = append(oes, sunyata.OutputElement{
+		StateElement: sunyata.StateElement{
+			ID: b.MinerOutputID(),
 		},
-		Value:    vc.BlockReward(),
-		Address:  b.Header.MinerAddress,
-		Timelock: vc.BlockRewardTimelock(),
+		Output: sunyata.Output{
+			Value:   s.BlockReward(),
+			Address: b.Header.MinerAddress,
+		},
+		MaturityHeight: s.MaturityHeight(),
 	})
 	for _, txn := range b.Transactions {
 		txid := txn.ID()
-		for i, out := range txn.Outputs {
-			addOutput(sunyata.Output{
-				ID: sunyata.OutputID{
-					TransactionID: txid,
-					Index:         uint64(i),
+		var index uint64
+		nextElement := func() sunyata.StateElement {
+			index++
+			return sunyata.StateElement{
+				ID: sunyata.ElementID{
+					Source: sunyata.Hash256(txid),
+					Index:  index - 1,
 				},
-				Value:    out.Value,
-				Address:  out.Address,
-				Timelock: 0,
+			}
+		}
+
+		for _, out := range txn.Outputs {
+			oes = append(oes, sunyata.OutputElement{
+				StateElement: nextElement(),
+				Output:       out,
 			})
 		}
 	}
@@ -122,92 +89,123 @@ func createdInBlock(vc ValidationContext, b sunyata.Block) (outputs []sunyata.Ou
 	return
 }
 
-// A StateApplyUpdate reflects the changes to consensus state resulting from the
+// A ApplyUpdate reflects the changes to consensus state resulting from the
 // application of a block.
-type StateApplyUpdate struct {
-	Context        ValidationContext
-	SpentOutputs   []sunyata.Output
-	NewOutputs     []sunyata.Output
-	updatedObjects [64][]stateObject
-	treeGrowth     [64][]sunyata.Hash256
+type ApplyUpdate struct {
+	merkle.ElementApplyUpdate
+	merkle.HistoryApplyUpdate
+
+	State             State
+	SpentOutputs      []sunyata.OutputElement
+	NewOutputElements []sunyata.OutputElement
 }
 
-// OutputWasSpent returns true if the given Output was spent.
-func (sau *StateApplyUpdate) OutputWasSpent(o sunyata.Output) bool {
-	for i := range sau.SpentOutputs {
-		if sau.SpentOutputs[i].LeafIndex == o.LeafIndex {
+// OutputElementWasSpent returns true if the OutputElement was spent.
+func (au *ApplyUpdate) OutputElementWasSpent(oe sunyata.OutputElement) bool {
+	for i := range au.SpentOutputs {
+		if au.SpentOutputs[i].LeafIndex == oe.LeafIndex {
 			return true
 		}
 	}
 	return false
 }
 
-// UpdateOutputProof updates the Merkle proof of the supplied output to
-// incorporate the changes made to the state tree. The output's proof must be
-// up-to-date; if it is not, UpdateOutputProof may panic.
-func (sau *StateApplyUpdate) UpdateOutputProof(o *sunyata.Output) {
-	updateProof(o.MerkleProof, o.LeafIndex, &sau.updatedObjects)
-	o.MerkleProof = append(o.MerkleProof, sau.treeGrowth[len(o.MerkleProof)]...)
+// UpdateTransactionProofs updates the element proofs of a transaction.
+func (au *ApplyUpdate) UpdateTransactionProofs(txn *sunyata.Transaction) {
+	for i := range txn.Inputs {
+		if txn.Inputs[i].Parent.LeafIndex != sunyata.EphemeralLeafIndex {
+			au.UpdateElementProof(&txn.Inputs[i].Parent.StateElement)
+		}
+	}
 }
 
-// ApplyBlock integrates a block into the current consensus state, producing
-// a StateApplyUpdate detailing the resulting changes. The block is assumed to
-// be fully validated.
-func ApplyBlock(vc ValidationContext, b sunyata.Block) (sau StateApplyUpdate) {
-	sau.Context = applyHeader(vc, b.Header)
+// ApplyBlock integrates a block into the current consensus state, producing an
+// ApplyUpdate detailing the resulting changes. The block is assumed to be fully
+// validated.
+func ApplyBlock(s State, b sunyata.Block) (au ApplyUpdate) {
+	if s.Index.Height > 0 && s.Index != b.Header.ParentIndex() {
+		panic("consensus: cannot apply non-child block")
+	}
 
-	var updated, created []stateObject
-	sau.SpentOutputs, updated = updatedInBlock(vc, b)
-	sau.NewOutputs, created = createdInBlock(vc, b)
-
-	sau.updatedObjects = sau.Context.State.updateExistingObjects(updated)
-	sau.treeGrowth = sau.Context.State.addNewObjects(created)
-	for i := range sau.NewOutputs {
-		sau.NewOutputs[i].LeafIndex = created[0].leafIndex
-		sau.NewOutputs[i].MerkleProof = created[0].proof
+	// update elements
+	var updated, created []merkle.ElementLeaf
+	au.SpentOutputs, updated = updatedInBlock(s, b, true)
+	au.NewOutputElements = createdInBlock(s, b)
+	spent := make(map[sunyata.ElementID]bool)
+	for _, txn := range b.Transactions {
+		for _, in := range txn.Inputs {
+			if in.Parent.LeafIndex == sunyata.EphemeralLeafIndex {
+				spent[in.Parent.ID] = true
+			}
+		}
+	}
+	for _, oe := range au.NewOutputElements {
+		created = append(created, merkle.OutputLeaf(oe, spent[oe.ID]))
+	}
+	au.ElementApplyUpdate = s.Elements.ApplyBlock(updated, created)
+	for i := range au.NewOutputElements {
+		au.NewOutputElements[i].StateElement = created[0].StateElement
 		created = created[1:]
 	}
+
+	// update history
+	au.HistoryApplyUpdate = s.History.ApplyBlock(b.Index())
+
+	// update state
+	applyHeader(&s, b.Header)
+	au.State = s
 
 	return
 }
 
-// GenesisUpdate returns the StateApplyUpdate for the genesis block b.
-func GenesisUpdate(b sunyata.Block, initialDifficulty sunyata.Work) StateApplyUpdate {
-	return ApplyBlock(ValidationContext{
+// GenesisUpdate returns the ApplyUpdate for the genesis block b.
+func GenesisUpdate(b sunyata.Block, initialDifficulty sunyata.Work) ApplyUpdate {
+	return ApplyBlock(State{
 		Difficulty: initialDifficulty,
+		LastAdjust: b.Header.Timestamp,
 	}, b)
 }
 
-// A StateRevertUpdate reflects the changes to consensus state resulting from the
+// A RevertUpdate reflects the changes to consensus state resulting from the
 // removal of a block.
-type StateRevertUpdate struct {
-	Context        ValidationContext
-	SpentOutputs   []sunyata.Output
-	NewOutputs     []sunyata.Output
-	updatedObjects [64][]stateObject
+type RevertUpdate struct {
+	merkle.ElementRevertUpdate
+	merkle.HistoryRevertUpdate
+
+	State             State
+	SpentOutputs      []sunyata.OutputElement
+	NewOutputElements []sunyata.OutputElement
 }
 
-// OutputWasRemoved returns true if the specified Output was reverted.
-func (sru *StateRevertUpdate) OutputWasRemoved(o sunyata.Output) bool {
-	return o.LeafIndex >= sru.Context.State.NumLeaves
+// OutputElementWasRemoved returns true if the specified OutputElement was
+// reverted.
+func (ru *RevertUpdate) OutputElementWasRemoved(oe sunyata.OutputElement) bool {
+	return oe.LeafIndex != sunyata.EphemeralLeafIndex && oe.LeafIndex >= ru.State.Elements.NumLeaves
 }
 
-// UpdateOutputProof updates the Merkle proof of the supplied output to
-// incorporate the changes made to the state tree. The output's proof must be
-// up-to-date; if it is not, UpdateOutputProof may panic.
-func (sru *StateRevertUpdate) UpdateOutputProof(o *sunyata.Output) {
-	if mh := mergeHeight(sru.Context.State.NumLeaves, o.LeafIndex); mh <= len(o.MerkleProof) {
-		o.MerkleProof = o.MerkleProof[:mh-1]
+// UpdateTransactionProofs updates the element proofs of a transaction.
+func (ru *RevertUpdate) UpdateTransactionProofs(txn *sunyata.Transaction) {
+	for i := range txn.Inputs {
+		if txn.Inputs[i].Parent.LeafIndex != sunyata.EphemeralLeafIndex {
+			ru.UpdateElementProof(&txn.Inputs[i].Parent.StateElement)
+		}
 	}
-	updateProof(o.MerkleProof, o.LeafIndex, &sru.updatedObjects)
 }
 
-// RevertBlock produces a StateRevertUpdate from a block and the
-// ValidationContext prior to that block.
-func RevertBlock(vc ValidationContext, b sunyata.Block) (sru StateRevertUpdate) {
-	sru.Context = vc
-	sru.SpentOutputs, _ = updatedInBlock(vc, b)
-	sru.NewOutputs, _ = createdInBlock(vc, b)
-	sru.updatedObjects = objectsByTree(b.Transactions)
+// RevertBlock produces a RevertUpdate from a block and the State
+// prior to that block.
+func RevertBlock(s State, b sunyata.Block) (ru RevertUpdate) {
+	if b.Header.Height == 0 {
+		panic("consensus: cannot revert genesis block")
+	} else if s.Index != b.Header.ParentIndex() {
+		panic("consensus: cannot revert non-child block")
+	}
+
+	ru.State = s
+	ru.HistoryRevertUpdate = ru.State.History.RevertBlock(b.Index())
+	var updated []merkle.ElementLeaf
+	ru.SpentOutputs, updated = updatedInBlock(s, b, false)
+	ru.NewOutputElements = createdInBlock(s, b)
+	ru.ElementRevertUpdate = ru.State.Elements.RevertBlock(updated)
 	return
 }

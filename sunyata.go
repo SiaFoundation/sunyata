@@ -5,20 +5,22 @@ package sunyata
 import (
 	"bytes"
 	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha512"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
-	"hash"
+	"io"
 	"math"
 	"math/big"
 	"math/bits"
-	"sync"
+	"strconv"
 	"time"
 )
 
-// EphemeralLeafIndex is used as the LeafIndex of Outputs that are created and
-// spent within the same block. Such outputs do not require a proof of
+// EphemeralLeafIndex is used as the LeafIndex of StateElements that are created
+// and spent within the same block. Such elements do not require a proof of
 // existence. They are, however, assigned a proper index and are incorporated
 // into the state accumulator when the block is processed.
 const EphemeralLeafIndex = math.MaxUint64
@@ -44,96 +46,123 @@ func (bid BlockID) MeetsTarget(t BlockID) bool {
 	return bytes.Compare(bid[:], t[:]) <= 0
 }
 
+// A TransactionID uniquely identifies a transaction.
+type TransactionID Hash256
+
 // A ChainIndex pairs a block's height with its ID.
-//
-// Using either value alone can be problematic: if only the height is known, it
-// could refer to multiple blocks on different chains; if only the ID is known,
-// efficient random access to blocks (e.g. within a slice or a flat file) is not
-// possible without a supplementary lookup table.
 type ChainIndex struct {
 	Height uint64
 	ID     BlockID
 }
 
-// A PublicKey is an ed25519 public key.
+// A PublicKey is an Ed25519 public key.
 type PublicKey [32]byte
+
+// A PrivateKey is an Ed25519 private key.
+type PrivateKey []byte
+
+// A Signature is an Ed25519 signature.
+type Signature [64]byte
 
 // Address returns the address corresponding to a public key.
 func (pk PublicKey) Address() Address { return Address(HashBytes(pk[:])) }
 
-// A TransactionID uniquely identifies a transaction.
-type TransactionID Hash256
+// PublicKey returns the PublicKey corresponding to priv.
+func (priv PrivateKey) PublicKey() (pk PublicKey) {
+	copy(pk[:], priv[32:])
+	return
+}
 
-// An OutputID uniquely identifies an Output.
-type OutputID struct {
-	TransactionID TransactionID
-	Index         uint64
+// NewPrivateKeyFromSeed calculates a private key from a seed.
+func NewPrivateKeyFromSeed(seed []byte) PrivateKey {
+	return PrivateKey(ed25519.NewKeyFromSeed(seed))
+}
+
+// GeneratePrivateKey creates a new private key from a secure entropy source.
+func GeneratePrivateKey() PrivateKey {
+	seed := make([]byte, ed25519.SeedSize)
+	rand.Read(seed)
+	pk := NewPrivateKeyFromSeed(seed)
+	for i := range seed {
+		seed[i] = 0
+	}
+	return pk
+}
+
+// SignHash signs h with priv, producing a Signature.
+func (priv PrivateKey) SignHash(h Hash256) (s Signature) {
+	copy(s[:], ed25519.Sign(ed25519.PrivateKey(priv), h[:]))
+	return
+}
+
+// VerifyHash verifies that s is a valid signature of h by pk.
+func (pk PublicKey) VerifyHash(h Hash256, s Signature) bool {
+	return ed25519.Verify(pk[:], h[:], s[:])
 }
 
 // An Output is a volume of currency that is created and spent as an atomic
-// unit. Every Output has an associated Address; spending the Output requires
-// revealing the PublicKey that is the preimage of the Address. An auxilliary
-// condition is the Timelock, which renders the Output unspendable until the
-// specified chain height is reached. Finally, the utreexo model requires the
-// spender to prove that the Output is spendable, i.e. that it is within the set
-// of spendable outputs; to this end, each Output contains a Merkle proof and
-// some associated leaf data.
+// unit.
 type Output struct {
-	ID          OutputID
-	Value       Currency
-	Address     Address
-	Timelock    uint64
-	MerkleProof []Hash256
-	LeafIndex   uint64
+	Value   Currency
+	Address Address
 }
 
-// An InputSignature signs a transaction input.
-type InputSignature [64]byte
+// An ElementID uniquely identifies a StateElement.
+type ElementID struct {
+	Source Hash256 // BlockID or TransactionID
+	Index  uint64
+}
 
-// SignTransaction signs sigHash with privateKey, producing an InputSignature.
-func SignTransaction(privateKey ed25519.PrivateKey, sigHash Hash256) (is InputSignature) {
-	copy(is[:], ed25519.Sign(privateKey, sigHash[:]))
-	return
+// A StateElement is a generic element within the state accumulator.
+type StateElement struct {
+	ID          ElementID
+	LeafIndex   uint64
+	MerkleProof []Hash256
+}
+
+// An OutputElement is a volume of currency that is created and spent as an
+// atomic unit.
+type OutputElement struct {
+	StateElement
+	Output
+	MaturityHeight uint64
 }
 
 // An Input spends its parent Output by revealing its public key and signing the
 // transaction.
 type Input struct {
-	Parent    Output
+	Parent    OutputElement
 	PublicKey PublicKey
-	Signature InputSignature
-}
-
-// A Beneficiary is the recipient of some of the value spent in a transaction.
-type Beneficiary struct {
-	Value   Currency
-	Address Address
+	Signature Signature
 }
 
 // A Transaction transfers value by consuming existing Outputs and creating new
 // Outputs.
 type Transaction struct {
 	Inputs   []Input
-	Outputs  []Beneficiary
+	Outputs  []Output
 	MinerFee Currency
 }
 
-// ID returns the hash of all block-independent data in the transaction.
+// ID returns the "semantic hash" of the transaction, covering all of the
+// transaction's effects, but not incidental data such as signatures or Merkle
+// proofs. This ensures that the ID will remain stable (i.e. non-malleable).
+//
+// To hash all of the data in a transaction, use the EncodeTo method.
 func (txn *Transaction) ID() TransactionID {
 	h := hasherPool.Get().(*Hasher)
 	defer hasherPool.Put(h)
 	h.Reset()
-	// Input IDs, Outputs, and MinerFee are sufficient to uniquely identify a
-	// transaction
-	for i := range txn.Inputs {
-		h.WriteHash(txn.Inputs[i].Parent.ID.TransactionID)
-		h.WriteUint64(txn.Inputs[i].Parent.ID.Index)
+	h.E.WriteString("sunyata/id/transaction")
+	h.E.WritePrefix(len(txn.Inputs))
+	for _, in := range txn.Inputs {
+		in.Parent.ID.EncodeTo(h.E)
 	}
-	for i := range txn.Outputs {
-		h.WriteCurrency(txn.Outputs[i].Value)
-		h.WriteHash(txn.Outputs[i].Address)
+	h.E.WritePrefix(len(txn.Outputs))
+	for _, out := range txn.Outputs {
+		out.EncodeTo(h.E)
 	}
-	h.WriteCurrency(txn.MinerFee)
+	txn.MinerFee.EncodeTo(h.E)
 	return TransactionID(h.Sum())
 }
 
@@ -144,15 +173,34 @@ func (txn *Transaction) DeepCopy() Transaction {
 	for i := range c.Inputs {
 		c.Inputs[i].Parent.MerkleProof = append([]Hash256(nil), c.Inputs[i].Parent.MerkleProof...)
 	}
-	c.Outputs = append([]Beneficiary(nil), c.Outputs...)
+	c.Outputs = append([]Output(nil), c.Outputs...)
 	return c
+}
+
+// OutputID returns the ID of the output at index i.
+func (txn *Transaction) OutputID(i int) ElementID {
+	return ElementID{
+		Source: Hash256(txn.ID()),
+		Index:  uint64(i),
+	}
+}
+
+// EphemeralOutputElement returns txn.Outputs[i] as an ephemeral OutputElement.
+func (txn *Transaction) EphemeralOutputElement(i int) OutputElement {
+	return OutputElement{
+		StateElement: StateElement{
+			ID:        txn.OutputID(0),
+			LeafIndex: EphemeralLeafIndex,
+		},
+		Output: txn.Outputs[0],
+	}
 }
 
 // A BlockHeader contains a Block's non-transaction data.
 type BlockHeader struct {
 	Height       uint64
 	ParentID     BlockID
-	Nonce        [8]byte
+	Nonce        uint64
 	Timestamp    time.Time
 	MinerAddress Address
 	Commitment   Hash256
@@ -176,10 +224,11 @@ func (h BlockHeader) ParentIndex() ChainIndex {
 
 // ID returns a hash that uniquely identifies a block.
 func (h BlockHeader) ID() BlockID {
-	buf := make([]byte, 8+8+32)
-	copy(buf[:], h.Nonce[:])
-	binary.LittleEndian.PutUint64(buf[8:], uint64(h.Timestamp.Unix()))
-	copy(buf[16:], h.Commitment[:])
+	buf := make([]byte, 16+8+8+32)
+	copy(buf[0:], "sunyata/id/block")
+	binary.LittleEndian.PutUint64(buf[16:], h.Nonce)
+	binary.LittleEndian.PutUint64(buf[24:], uint64(h.Timestamp.Unix()))
+	copy(buf[32:], h.Commitment[:])
 	return BlockID(HashBytes(buf))
 }
 
@@ -199,18 +248,22 @@ func (b *Block) ID() BlockID { return b.Header.ID() }
 // Index returns the block's chain index. It is equivalent to b.Header.Index().
 func (b *Block) Index() ChainIndex { return b.Header.Index() }
 
+// MinerOutputID returns the output ID of the miner payout.
+func (b *Block) MinerOutputID() ElementID {
+	return ElementID{
+		Source: Hash256(b.ID()),
+		Index:  0,
+	}
+}
+
 // Work represents a quantity of work.
 type Work struct {
 	// The representation is the expected number of hashes required to produce a
 	// given hash, in big-endian order.
-	//
-	// TODO: no reason not to use little-endian here, except that it would make
-	// it harder to convert to/from big.Int. If we replace big.Int with custom
-	// division code, then we can switch to little-endian.
 	NumHashes [32]byte
 }
 
-// Add returns w+v.
+// Add returns w+v, wrapping on overflow.
 func (w Work) Add(v Work) Work {
 	var r Work
 	var sum, c uint64
@@ -219,6 +272,45 @@ func (w Work) Add(v Work) Work {
 		vi := binary.BigEndian.Uint64(v.NumHashes[i:])
 		sum, c = bits.Add64(wi, vi, c)
 		binary.BigEndian.PutUint64(r.NumHashes[i:], sum)
+	}
+	return r
+}
+
+// Sub returns w-v, wrapping on underflow.
+func (w Work) Sub(v Work) Work {
+	var r Work
+	var sum, c uint64
+	for i := 24; i >= 0; i -= 8 {
+		wi := binary.BigEndian.Uint64(w.NumHashes[i:])
+		vi := binary.BigEndian.Uint64(v.NumHashes[i:])
+		sum, c = bits.Sub64(wi, vi, c)
+		binary.BigEndian.PutUint64(r.NumHashes[i:], sum)
+	}
+	return r
+}
+
+// Mul64 returns w*v, wrapping on overflow.
+func (w Work) Mul64(v uint64) Work {
+	var r Work
+	var c uint64
+	for i := 24; i >= 0; i -= 8 {
+		wi := binary.BigEndian.Uint64(w.NumHashes[i:])
+		hi, prod := bits.Mul64(wi, v)
+		prod, cc := bits.Add64(prod, c, 0)
+		c = hi + cc
+		binary.BigEndian.PutUint64(r.NumHashes[i:], prod)
+	}
+	return r
+}
+
+// Div64 returns w/v.
+func (w Work) Div64(v uint64) Work {
+	var r Work
+	var quo, rem uint64
+	for i := 0; i < len(w.NumHashes); i += 8 {
+		wi := binary.BigEndian.Uint64(w.NumHashes[i:])
+		quo, rem = bits.Div64(rem, wi, v)
+		binary.BigEndian.PutUint64(r.NumHashes[i:], quo)
 	}
 	return r
 }
@@ -283,101 +375,25 @@ func HashRequiringWork(w Work) BlockID {
 	return id
 }
 
-// A Hasher hashes data using sunyata's hash function.
-type Hasher struct {
-	h   hash.Hash
-	buf [64]byte
-}
-
-// Reset resets the underlying hasher.
-func (h *Hasher) Reset() {
-	h.h.Reset()
-}
-
-// Write implements io.Writer.
-func (h *Hasher) Write(p []byte) (int, error) {
-	buf := bytes.NewBuffer(p)
-	for buf.Len() > 0 {
-		n := copy(h.buf[:], buf.Next(len(h.buf)))
-		h.h.Write(h.buf[:n])
-	}
-	return len(p), nil
-}
-
-// WriteByte writes a single byte to the underlying hasher.
-func (h *Hasher) WriteByte(b byte) error {
-	h.buf[0] = b
-	h.h.Write(h.buf[:1])
-	return nil
-}
-
-// WriteBool writes a bool to the underlying hasher.
-func (h *Hasher) WriteBool(b bool) {
-	if b {
-		h.WriteByte(1)
-	} else {
-		h.WriteByte(0)
-	}
-}
-
-// WriteHash writes a generic hash to the underlying hasher.
-func (h *Hasher) WriteHash(p [32]byte) {
-	copy(h.buf[:], p[:])
-	h.h.Write(h.buf[:32])
-}
-
-// WriteUint64 writes a uint64 value to the underlying hasher.
-func (h *Hasher) WriteUint64(u uint64) {
-	binary.LittleEndian.PutUint64(h.buf[:8], u)
-	h.h.Write(h.buf[:8])
-}
-
-// WriteTime writes a time.Time value to the underlying hasher.
-func (h *Hasher) WriteTime(t time.Time) {
-	h.WriteUint64(uint64(t.Unix()))
-}
-
-// WriteCurrency writes a Currency value to the underlying hasher.
-func (h *Hasher) WriteCurrency(c Currency) {
-	binary.LittleEndian.PutUint64(h.buf[:8], c.Lo)
-	binary.LittleEndian.PutUint64(h.buf[8:], c.Hi)
-	h.h.Write(h.buf[:16])
-}
-
-// WriteChainIndex writes a ChainIndex value to the underlying hasher.
-func (h *Hasher) WriteChainIndex(index ChainIndex) {
-	binary.LittleEndian.PutUint64(h.buf[:8], index.Height)
-	copy(h.buf[8:], index.ID[:])
-	h.h.Write(h.buf[:40])
-}
-
-// WriteOutputID writes an OutputID value to the underlying hasher.
-func (h *Hasher) WriteOutputID(id OutputID) {
-	copy(h.buf[:32], id.TransactionID[:])
-	binary.LittleEndian.PutUint64(h.buf[32:], id.Index)
-	h.h.Write(h.buf[:40])
-}
-
-// Sum returns the hash of the data written to the underlying hasher.
-func (h *Hasher) Sum() Hash256 {
-	var sum Hash256
-	h.h.Sum(sum[:0])
-	return sum
-}
-
-// NewHasher returns a Hasher instance for sunyata's hash function.
-func NewHasher() *Hasher { return &Hasher{h: sha512.New512_256()} }
-
-// Pool for reducing heap allocations when hashing. This is only necessary
-// because sha512.New512_256 returns a hash.Hash interface, which prevents the
-// compiler from doing escape analysis. Can be removed if we switch to an
-// implementation whose constructor returns a concrete type.
-var hasherPool = &sync.Pool{New: func() interface{} { return NewHasher() }}
-
-// Implementations of fmt.Stringer and json.(Un)marshaler
+// Implementations of fmt.Stringer, encoding.Text(Un)marshaler, and json.(Un)marshaler
 
 func stringerHex(prefix string, data []byte) string {
 	return prefix + ":" + hex.EncodeToString(data[:])
+}
+
+func marshalHex(prefix string, data []byte) ([]byte, error) {
+	return []byte(stringerHex(prefix, data)), nil
+}
+
+func unmarshalHex(dst []byte, prefix string, data []byte) error {
+	n, err := hex.Decode(dst, bytes.TrimPrefix(data, []byte(prefix+":")))
+	if n < len(dst) {
+		err = io.EOF
+	}
+	if err != nil {
+		return fmt.Errorf("decoding %v:<hex> failed: %w", prefix, err)
+	}
+	return nil
 }
 
 func marshalJSONHex(prefix string, data []byte) ([]byte, error) {
@@ -385,15 +401,17 @@ func marshalJSONHex(prefix string, data []byte) ([]byte, error) {
 }
 
 func unmarshalJSONHex(dst []byte, prefix string, data []byte) error {
-	_, err := hex.Decode(dst, bytes.TrimPrefix(bytes.Trim(data, `"`), []byte(prefix+":")))
-	if err != nil {
-		return fmt.Errorf("decoding %v:<hex> failed: %w", prefix, err)
-	}
-	return nil
+	return unmarshalHex(dst, prefix, bytes.Trim(data, `"`))
 }
 
 // String implements fmt.Stringer.
 func (h Hash256) String() string { return stringerHex("h", h[:]) }
+
+// MarshalText implements encoding.TextMarshaler.
+func (h Hash256) MarshalText() ([]byte, error) { return marshalHex("h", h[:]) }
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (h *Hash256) UnmarshalText(b []byte) error { return unmarshalHex(h[:], "h", b) }
 
 // MarshalJSON implements json.Marshaler.
 func (h Hash256) MarshalJSON() ([]byte, error) { return marshalJSONHex("h", h[:]) }
@@ -405,20 +423,107 @@ func (h *Hash256) UnmarshalJSON(b []byte) error { return unmarshalJSONHex(h[:], 
 func (ci ChainIndex) String() string {
 	// use the 4 least-significant bytes of ID -- in a mature chain, the
 	// most-significant bytes will be zeros
-	return fmt.Sprintf("%v::%x", ci.Height, ci.ID[len(ci.ID)-4:])
+	return fmt.Sprintf("%d::%x", ci.Height, ci.ID[len(ci.ID)-4:])
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (ci ChainIndex) MarshalText() ([]byte, error) {
+	return []byte(fmt.Sprintf("%d::%x", ci.Height, ci.ID[:])), nil
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (ci *ChainIndex) UnmarshalText(b []byte) (err error) {
+	parts := bytes.Split(b, []byte("::"))
+	if len(parts) != 2 {
+		return fmt.Errorf("decoding <height>::<id> failed: wrong number of separators")
+	} else if ci.Height, err = strconv.ParseUint(string(parts[0]), 10, 64); err != nil {
+		return fmt.Errorf("decoding <height>::<id> failed: %w", err)
+	} else if n, err := hex.Decode(ci.ID[:], parts[1]); err != nil {
+		return fmt.Errorf("decoding <height>::<id> failed: %w", err)
+	} else if n < len(ci.ID) {
+		return fmt.Errorf("decoding <height>::<id> failed: %w", io.EOF)
+	}
+	return nil
+}
+
+// ParseChainIndex parses a chain index from a string.
+func ParseChainIndex(s string) (ci ChainIndex, err error) {
+	err = ci.UnmarshalText([]byte(s))
+	return
 }
 
 // String implements fmt.Stringer.
-func (a Address) String() string { return stringerHex("addr", a[:]) }
+func (eid ElementID) String() string {
+	return fmt.Sprintf("elem:%x:%v", eid.Source[:], eid.Index)
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (eid ElementID) MarshalText() ([]byte, error) { return []byte(eid.String()), nil }
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (eid *ElementID) UnmarshalText(b []byte) (err error) {
+	parts := bytes.Split(b, []byte(":"))
+	if len(parts) != 3 {
+		return fmt.Errorf("decoding <hex>:<index> failed: wrong number of separators")
+	} else if n, err := hex.Decode(eid.Source[:], parts[1]); err != nil {
+		return fmt.Errorf("decoding <hex>:<index> failed: %w", err)
+	} else if n < len(eid.Source) {
+		return fmt.Errorf("decoding <hex>:<index> failed: %w", io.EOF)
+	} else if eid.Index, err = strconv.ParseUint(string(parts[2]), 10, 64); err != nil {
+		return fmt.Errorf("decoding <hex>:<index> failed: %w", err)
+	}
+	return nil
+}
+
+// String implements fmt.Stringer.
+func (a Address) String() string {
+	checksum := HashBytes(a[:])
+	return stringerHex("addr", append(a[:], checksum[:6]...))
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (a Address) MarshalText() ([]byte, error) { return []byte(a.String()), nil }
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (a *Address) UnmarshalText(b []byte) (err error) {
+	withChecksum := make([]byte, 32+6)
+	n, err := hex.Decode(withChecksum, bytes.TrimPrefix(b, []byte("addr:")))
+	if err != nil {
+		err = fmt.Errorf("decoding addr:<hex> failed: %w", err)
+	} else if n != len(withChecksum) {
+		err = fmt.Errorf("decoding addr:<hex> failed: %w", io.EOF)
+	} else if checksum := HashBytes(withChecksum[:32]); !bytes.Equal(checksum[:6], withChecksum[32:]) {
+		err = errors.New("bad checksum")
+	}
+	copy(a[:], withChecksum[:32])
+	return
+}
 
 // MarshalJSON implements json.Marshaler.
-func (a Address) MarshalJSON() ([]byte, error) { return marshalJSONHex("addr", a[:]) }
+func (a Address) MarshalJSON() ([]byte, error) {
+	checksum := HashBytes(a[:])
+	return marshalJSONHex("addr", append(a[:], checksum[:6]...))
+}
 
 // UnmarshalJSON implements json.Unmarshaler.
-func (a *Address) UnmarshalJSON(b []byte) error { return unmarshalJSONHex(a[:], "addr", b) }
+func (a *Address) UnmarshalJSON(b []byte) (err error) {
+	return a.UnmarshalText(bytes.Trim(b, `"`))
+}
+
+// ParseAddress parses an address from a prefixed hex encoded string.
+func ParseAddress(s string) (a Address, err error) {
+	err = a.UnmarshalText([]byte(s))
+	return
+}
 
 // String implements fmt.Stringer.
 func (bid BlockID) String() string { return stringerHex("bid", bid[:]) }
+
+// MarshalText implements encoding.TextMarshaler.
+func (bid BlockID) MarshalText() ([]byte, error) { return marshalHex("bid", bid[:]) }
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (bid *BlockID) UnmarshalText(b []byte) error { return unmarshalHex(bid[:], "bid", b) }
 
 // MarshalJSON implements json.Marshaler.
 func (bid BlockID) MarshalJSON() ([]byte, error) { return marshalJSONHex("bid", bid[:]) }
@@ -429,6 +534,12 @@ func (bid *BlockID) UnmarshalJSON(b []byte) error { return unmarshalJSONHex(bid[
 // String implements fmt.Stringer.
 func (pk PublicKey) String() string { return stringerHex("ed25519", pk[:]) }
 
+// MarshalText implements encoding.TextMarshaler.
+func (pk PublicKey) MarshalText() ([]byte, error) { return marshalHex("ed25519", pk[:]) }
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (pk *PublicKey) UnmarshalText(b []byte) error { return unmarshalHex(pk[:], "ed25519", b) }
+
 // MarshalJSON implements json.Marshaler.
 func (pk PublicKey) MarshalJSON() ([]byte, error) { return marshalJSONHex("ed25519", pk[:]) }
 
@@ -438,6 +549,12 @@ func (pk *PublicKey) UnmarshalJSON(b []byte) error { return unmarshalJSONHex(pk[
 // String implements fmt.Stringer.
 func (tid TransactionID) String() string { return stringerHex("txid", tid[:]) }
 
+// MarshalText implements encoding.TextMarshaler.
+func (tid TransactionID) MarshalText() ([]byte, error) { return marshalHex("txid", tid[:]) }
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (tid *TransactionID) UnmarshalText(b []byte) error { return unmarshalHex(tid[:], "txid", b) }
+
 // MarshalJSON implements json.Marshaler.
 func (tid TransactionID) MarshalJSON() ([]byte, error) { return marshalJSONHex("txid", tid[:]) }
 
@@ -445,13 +562,49 @@ func (tid TransactionID) MarshalJSON() ([]byte, error) { return marshalJSONHex("
 func (tid *TransactionID) UnmarshalJSON(b []byte) error { return unmarshalJSONHex(tid[:], "txid", b) }
 
 // String implements fmt.Stringer.
-func (is InputSignature) String() string { return stringerHex("sig", is[:]) }
+func (sig Signature) String() string { return stringerHex("sig", sig[:]) }
+
+// MarshalText implements encoding.TextMarshaler.
+func (sig Signature) MarshalText() ([]byte, error) { return marshalHex("sig", sig[:]) }
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (sig *Signature) UnmarshalText(b []byte) error { return unmarshalHex(sig[:], "sig", b) }
 
 // MarshalJSON implements json.Marshaler.
-func (is InputSignature) MarshalJSON() ([]byte, error) { return marshalJSONHex("sig", is[:]) }
+func (sig Signature) MarshalJSON() ([]byte, error) { return marshalJSONHex("sig", sig[:]) }
 
 // UnmarshalJSON implements json.Unmarshaler.
-func (is *InputSignature) UnmarshalJSON(b []byte) error { return unmarshalJSONHex(is[:], "sig", b) }
+func (sig *Signature) UnmarshalJSON(b []byte) error { return unmarshalJSONHex(sig[:], "sig", b) }
 
 // String implements fmt.Stringer.
 func (w Work) String() string { return new(big.Int).SetBytes(w.NumHashes[:]).String() }
+
+// MarshalText implements encoding.TextMarshaler.
+func (w Work) MarshalText() ([]byte, error) {
+	return new(big.Int).SetBytes(w.NumHashes[:]).MarshalText()
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (w *Work) UnmarshalText(b []byte) error {
+	i := new(big.Int)
+	if err := i.UnmarshalText(b); err != nil {
+		return err
+	} else if i.Sign() < 0 {
+		return errors.New("value cannot be negative")
+	} else if i.BitLen() > 256 {
+		return errors.New("value overflows Work representation")
+	}
+	i.FillBytes(w.NumHashes[:])
+	return nil
+}
+
+// UnmarshalJSON implements json.Unmarshaler.
+func (w *Work) UnmarshalJSON(b []byte) error {
+	return w.UnmarshalText(bytes.Trim(b, `"`))
+}
+
+// MarshalJSON implements json.Marshaler.
+func (w Work) MarshalJSON() ([]byte, error) {
+	js, err := new(big.Int).SetBytes(w.NumHashes[:]).MarshalJSON()
+	return []byte(`"` + string(js) + `"`), err
+}

@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -38,7 +37,7 @@ var (
 		Transactions: genesisTxns,
 	}
 	genesisUpdate = consensus.GenesisUpdate(genesisBlock, sunyata.Work{NumHashes: [32]byte{29: 1 << 4}})
-	genesis       = consensus.Checkpoint{Block: genesisBlock, Context: genesisUpdate.Context}
+	genesis       = consensus.Checkpoint{Block: genesisBlock, State: genesisUpdate.State}
 )
 
 func die(context string, err error) {
@@ -56,7 +55,7 @@ func main() {
 	seed := flag.String("seed", "", "wallet seed to use")
 	flag.Parse()
 
-	log.Println("空 sunyata v0.5.0")
+	log.Println("空 sunyata v0.6.0")
 
 	if *dir == "" {
 		tmpdir, err := os.MkdirTemp(os.TempDir(), "sunyata")
@@ -69,9 +68,9 @@ func main() {
 
 	initCheckpoint := genesis
 	if *checkpoint != "" {
-		index, ok := parseIndex(*checkpoint)
-		if !ok {
-			log.Fatal("Invalid checkpoint")
+		index, err := sunyata.ParseChainIndex(*checkpoint)
+		if err != nil {
+			die("Invalid checkpoint", err)
 		}
 		if *peer == "" {
 			log.Fatal("Must specify -peer to download checkpoint from")
@@ -203,7 +202,7 @@ Available commands:
 				fmt.Println("unknown command")
 			}
 		case "height":
-			fmt.Println(n.tt.Height())
+			fmt.Println(n.c.Tip().Height)
 		case "checkpoint":
 			if len(args) < 2 {
 				fmt.Println("missing arg")
@@ -221,9 +220,14 @@ Available commands:
 			}
 			fmt.Printf("%v::%x\n", index.Height, index.ID[:])
 		case "balance":
-			fmt.Println(n.w.Balance(), "C")
+			fmt.Println(n.ws.Balance())
 		case "addr":
-			fmt.Println(n.w.NextAddress())
+			index := n.ws.SeedIndex()
+			addr := n.seed.PublicKey(index).Address()
+			if err := n.ws.AddAddress(addr, index); err != nil {
+				die("Couldn't add address", err)
+			}
+			fmt.Println(addr)
 		case "send":
 			if len(args) < 3 {
 				fmt.Println("missing arg(s)")
@@ -235,7 +239,11 @@ Available commands:
 				fmt.Printf("Sent %v to %v\n", args[1], args[2])
 			}
 		case "txns":
-			if txns := n.w.Transactions(); len(txns) == 0 {
+			txns, err := n.ws.Transactions(time.Time{}, -1)
+			if err != nil {
+				die("Couldn't get transactions:", err)
+			}
+			if len(txns) == 0 {
 				fmt.Println("No transactions to show")
 			} else {
 				fmt.Println("Height        Delta    ID")
@@ -275,7 +283,7 @@ func newNode(addr, dir, seedStr string, c consensus.Checkpoint) (*node, error) {
 	if err := os.MkdirAll(walletDir, 0700); err != nil {
 		return nil, err
 	}
-	walletStore, walletTip, err := walletutil.NewJSONStore(walletDir, tip.Context)
+	walletStore, walletTip, err := walletutil.NewJSONStore(walletDir, tip.State.Index)
 	if err != nil {
 		return nil, err
 	}
@@ -284,18 +292,16 @@ func newNode(addr, dir, seedStr string, c consensus.Checkpoint) (*node, error) {
 		return nil, err
 	}
 
-	cm := chain.NewManager(chainStore, tip.Context)
-	tp := txpool.New(tip.Context)
+	cm := chain.NewManager(chainStore, tip.State)
+	tp := txpool.New(tip.State)
 	cm.AddSubscriber(tp, cm.Tip())
 	if err := cm.AddSubscriber(walletStore, walletTip); err != nil {
 		return nil, err
 	}
-	w := wallet.NewHotWallet(walletStore, seed)
-	m := miner.New(tip.Context, w.NextAddress(), tp, miner.CPU)
+	minerAddr := sunyata.Address(seed.PublicKey(0))
+	walletStore.AddAddress(minerAddr, 0)
+	m := miner.New(tip.State, minerAddr, tp, miner.CPU)
 	cm.AddSubscriber(m, cm.Tip())
-
-	tt := newTipTracker(cm.Tip())
-	cm.AddSubscriber(tt, cm.Tip())
 
 	s, err := p2p.NewSyncer(addr, genesisBlock.ID(), cm, tp)
 	if err != nil {
@@ -303,13 +309,13 @@ func newNode(addr, dir, seedStr string, c consensus.Checkpoint) (*node, error) {
 	}
 
 	return &node{
-		c:  cm,
-		cs: chainStore,
-		tp: tp,
-		s:  s,
-		w:  w,
-		m:  m,
-		tt: tt,
+		c:    cm,
+		cs:   chainStore,
+		tp:   tp,
+		s:    s,
+		ws:   walletStore,
+		seed: seed,
+		m:    m,
 	}, nil
 }
 
@@ -319,9 +325,9 @@ type node struct {
 	cs     *chainutil.FlatStore
 	tp     *txpool.Pool
 	s      *p2p.Syncer
-	w      *wallet.HotWallet
+	ws     *walletutil.JSONStore
+	seed   wallet.Seed
 	m      *miner.Miner
-	tt     *tipTracker
 }
 
 func (d *node) run() {
@@ -351,7 +357,7 @@ func (d *node) send(amountStr string, destStr string) error {
 	if err != nil {
 		return err
 	}
-	amount := sunyata.BaseUnitsPerCoin.Mul64(uint64(amountInt))
+	amount := sunyata.BaseUnitsPerCoin.Mul64(amountInt)
 	destBytes, err := hex.DecodeString(strings.TrimPrefix(destStr, "addr:"))
 	if err != nil {
 		return err
@@ -362,18 +368,21 @@ func (d *node) send(amountStr string, destStr string) error {
 	copy(dest[:], destBytes)
 
 	txn := sunyata.Transaction{
-		Outputs: []sunyata.Beneficiary{{Value: amount, Address: dest}},
+		Outputs: []sunyata.Output{{Value: amount, Address: dest}},
 	}
-	toSign, discard, err := d.w.FundTransaction(&txn, amount, d.tp.Transactions())
+
+	tb := wallet.NewTransactionBuilder(d.ws)
+	toSign, err := tb.Fund(d.c.TipState(), &txn, amount, d.seed, d.tp.Transactions())
 	if err != nil {
 		return err
 	}
-	defer discard()
-	if err := d.w.SignTransaction(&txn, toSign); err != nil {
+	if err := tb.SignTransaction(d.c.TipState(), &txn, toSign, d.seed); err != nil {
+		tb.ReleaseInputs(txn)
 		return err
 	}
 	// give message to ourselves and to peers
 	if err := d.tp.AddTransaction(txn); err != nil {
+		tb.ReleaseInputs(txn)
 		return fmt.Errorf("txpool rejected transaction: %w", err)
 	}
 	d.s.Broadcast(&p2p.MsgRelayTransactionSet{Transactions: []sunyata.Transaction{txn}})
@@ -408,35 +417,6 @@ func (d *node) mine() {
 	}
 }
 
-type tipTracker struct {
-	tip sunyata.ChainIndex
-	mu  sync.Mutex
-}
-
-func (tt *tipTracker) Height() uint64 {
-	tt.mu.Lock()
-	defer tt.mu.Unlock()
-	return tt.tip.Height
-}
-
-func (tt *tipTracker) ProcessChainApplyUpdate(cau *chain.ApplyUpdate, _ bool) error {
-	tt.mu.Lock()
-	defer tt.mu.Unlock()
-	tt.tip = cau.Context.Index
-	return nil
-}
-
-func (tt *tipTracker) ProcessChainRevertUpdate(cru *chain.RevertUpdate) error {
-	tt.mu.Lock()
-	defer tt.mu.Unlock()
-	tt.tip = cru.Context.Index
-	return nil
-}
-
-func newTipTracker(tip sunyata.ChainIndex) *tipTracker {
-	return &tipTracker{tip: tip}
-}
-
 func formatTxn(txn sunyata.Transaction) string {
 	var b bytes.Buffer
 	fmt.Fprintf(&b, "{\n  Inputs: {\n")
@@ -449,23 +429,4 @@ func formatTxn(txn sunyata.Transaction) string {
 	}
 	fmt.Fprintf(&b, "  }\n  MinerFee: %v\n}\n", txn.MinerFee)
 	return b.String()
-}
-
-func parseIndex(s string) (sunyata.ChainIndex, bool) {
-	parts := strings.Split(s, "::")
-	if len(parts) != 2 {
-		return sunyata.ChainIndex{}, false
-	}
-	height, err := strconv.ParseUint(parts[0], 10, 64)
-	if err != nil {
-		return sunyata.ChainIndex{}, false
-	}
-	var id sunyata.BlockID
-	if n, err := hex.Decode(id[:], []byte(parts[1])); n != len(id) || err != nil {
-		return sunyata.ChainIndex{}, false
-	}
-	return sunyata.ChainIndex{
-		Height: height,
-		ID:     id,
-	}, true
 }

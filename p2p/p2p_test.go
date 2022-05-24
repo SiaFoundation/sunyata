@@ -17,7 +17,6 @@ import (
 	"go.sia.tech/sunyata/internal/walletutil"
 	"go.sia.tech/sunyata/miner"
 	"go.sia.tech/sunyata/txpool"
-	"go.sia.tech/sunyata/wallet"
 )
 
 type testNode struct {
@@ -26,7 +25,7 @@ type testNode struct {
 	cs     chain.ManagerStore
 	tp     *txpool.Pool
 	s      *Syncer
-	w      *wallet.HotWallet
+	w      *walletutil.TestingWallet
 	m      *miner.Miner
 }
 
@@ -49,14 +48,14 @@ func (tn *testNode) Close() error {
 
 func (tn *testNode) send(amount sunyata.Currency, dest sunyata.Address) error {
 	txn := sunyata.Transaction{
-		Outputs: []sunyata.Beneficiary{{Value: amount, Address: dest}},
+		Outputs: []sunyata.Output{{Value: amount, Address: dest}},
 	}
 	toSign, discard, err := tn.w.FundTransaction(&txn, amount, tn.tp.Transactions())
 	if err != nil {
 		return err
 	}
 	defer discard()
-	if err := tn.w.SignTransaction(&txn, toSign); err != nil {
+	if err := tn.w.SignTransaction(tn.c.TipState(), &txn, toSign); err != nil {
 		return err
 	}
 	// give message to ourselves and to peers
@@ -99,13 +98,12 @@ func (tn *testNode) mine() {
 
 func newTestNode(tb testing.TB, genesisID sunyata.BlockID, c consensus.Checkpoint) *testNode {
 	cs := chainutil.NewEphemeralStore(c)
-	cm := chain.NewManager(cs, c.Context)
-	tp := txpool.New(c.Context)
+	cm := chain.NewManager(cs, c.State)
+	tp := txpool.New(c.State)
 	cm.AddSubscriber(tp, cm.Tip())
-	ws := walletutil.NewEphemeralStore()
-	w := wallet.NewHotWallet(ws, wallet.NewSeed())
-	cm.AddSubscriber(ws, cm.Tip())
-	m := miner.New(c.Context, w.NextAddress(), tp, miner.CPU)
+	w := walletutil.NewTestingWallet(c.State)
+	cm.AddSubscriber(w, cm.Tip())
+	m := miner.New(c.State, w.NewAddress(), tp, miner.CPU)
 	cm.AddSubscriber(m, cm.Tip())
 	s, err := NewSyncer(":0", genesisID, cm, tp)
 	if err != nil {
@@ -129,8 +127,8 @@ func TestNetwork(t *testing.T) {
 	}
 	sau := consensus.GenesisUpdate(genesisBlock, sunyata.Work{NumHashes: [32]byte{30: 1 << 2}})
 	genesis := consensus.Checkpoint{
-		Block:   genesisBlock,
-		Context: sau.Context,
+		Block: genesisBlock,
+		State: sau.State,
 	}
 
 	// create two nodes and connect them
@@ -149,8 +147,8 @@ func TestNetwork(t *testing.T) {
 	n2.startMining()
 
 	// simulate some chain activity by spamming simple txns, stopping when we reach height >= 100
-	n1addr := n1.w.NextAddress()
-	n2addr := n2.w.NextAddress()
+	n1addr := n1.w.NewAddress()
+	n2addr := n2.w.NewAddress()
 	for n1.c.Tip().Height < 100 {
 		time.Sleep(10 * time.Millisecond)
 		go n1.send(sunyata.BaseUnitsPerCoin.Mul64(7), n2addr)
@@ -184,8 +182,8 @@ func TestConnect(t *testing.T) {
 	}
 	sau := consensus.GenesisUpdate(genesisBlock, sunyata.Work{NumHashes: [32]byte{30: 1 << 2}})
 	genesis := consensus.Checkpoint{
-		Block:   genesisBlock,
-		Context: sau.Context,
+		Block: genesisBlock,
+		State: sau.State,
 	}
 
 	n := newTestNode(t, genesisBlock.ID(), genesis)
@@ -241,8 +239,8 @@ func TestCheckpoint(t *testing.T) {
 	}
 	sau := consensus.GenesisUpdate(genesisBlock, sunyata.Work{NumHashes: [32]byte{30: 1 << 2}})
 	genesis := consensus.Checkpoint{
-		Block:   genesisBlock,
-		Context: sau.Context,
+		Block: genesisBlock,
+		State: sau.State,
 	}
 
 	// create a node and mine some blocks

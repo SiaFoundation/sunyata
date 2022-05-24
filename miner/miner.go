@@ -3,7 +3,6 @@
 package miner
 
 import (
-	"crypto/rand"
 	"sync"
 	"time"
 	"unsafe"
@@ -28,7 +27,7 @@ type Miner struct {
 	grinder NonceGrinder
 
 	mu    sync.Mutex
-	vc    consensus.ValidationContext
+	cs    consensus.State
 	mined int
 	rate  float64
 }
@@ -54,7 +53,7 @@ func (m *Miner) txnsForBlock() (blockTxns []sunyata.Transaction) {
 		addDeps = func(txn sunyata.Transaction) {
 			added[txn.ID()] = true
 			for _, in := range txn.Inputs {
-				parentID := in.Parent.ID.TransactionID
+				parentID := sunyata.TransactionID(in.Parent.ID.Source)
 				if parent, inPool := poolTxns[parentID]; inPool && !added[parentID] {
 					// NOTE: important that we add the parent's deps before the
 					// parent itself
@@ -68,13 +67,13 @@ func (m *Miner) txnsForBlock() (blockTxns []sunyata.Transaction) {
 		return
 	}
 
-	capacity := m.vc.MaxBlockWeight()
+	capacity := m.cs.MaxBlockWeight()
 	for _, txn := range poolTxns {
 		// prepend the txn with its dependencies
 		group := append(calcDeps(txn), txn)
 		// if the weight of the group exceeds the remaining capacity of the
 		// block, skip it
-		groupWeight := m.vc.BlockWeight(group)
+		groupWeight := m.cs.BlockWeight(group)
 		if groupWeight > capacity {
 			continue
 		}
@@ -92,14 +91,12 @@ func (m *Miner) txnsForBlock() (blockTxns []sunyata.Transaction) {
 // MineBlock mines a valid block, using transactions drawn from the txpool.
 func (m *Miner) MineBlock() sunyata.Block {
 	for {
-		// TODO: if the miner and txpool don't have the same tip, we'll
-		// construct an invalid block
 		m.mu.Lock()
-		parent := m.vc.Index
-		target := sunyata.HashRequiringWork(m.vc.Difficulty)
+		parent := m.cs.Index
+		target := sunyata.HashRequiringWork(m.cs.Difficulty)
 		addr := m.addr
 		txns := m.txnsForBlock()
-		commitment := m.vc.Commitment(addr, txns)
+		commitment := m.cs.Commitment(addr, txns)
 		m.mu.Unlock()
 		b := sunyata.Block{
 			Header: sunyata.BlockHeader{
@@ -111,7 +108,6 @@ func (m *Miner) MineBlock() sunyata.Block {
 			},
 			Transactions: txns,
 		}
-		rand.Read(b.Header.Nonce[:])
 
 		// grind
 		start := time.Now()
@@ -123,7 +119,7 @@ func (m *Miner) MineBlock() sunyata.Block {
 		m.mu.Lock()
 		m.mined++
 		m.rate = 1 / elapsed.Seconds()
-		tipChanged := m.vc.Index != parent
+		tipChanged := m.cs.Index != parent
 		m.mu.Unlock()
 		if !tipChanged {
 			return b
@@ -135,7 +131,7 @@ func (m *Miner) MineBlock() sunyata.Block {
 func (m *Miner) ProcessChainApplyUpdate(cau *chain.ApplyUpdate, _ bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.vc = cau.Context
+	m.cs = cau.State
 	return nil
 }
 
@@ -143,14 +139,14 @@ func (m *Miner) ProcessChainApplyUpdate(cau *chain.ApplyUpdate, _ bool) error {
 func (m *Miner) ProcessChainRevertUpdate(cru *chain.RevertUpdate) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.vc = cru.Context
+	m.cs = cru.State
 	return nil
 }
 
 // New returns a Miner initialized with the provided state.
-func New(vc consensus.ValidationContext, addr sunyata.Address, tp *txpool.Pool, ng NonceGrinder) *Miner {
+func New(cs consensus.State, addr sunyata.Address, tp *txpool.Pool, ng NonceGrinder) *Miner {
 	return &Miner{
-		vc:      vc,
+		cs:      cs,
 		addr:    addr,
 		tp:      tp,
 		grinder: ng,

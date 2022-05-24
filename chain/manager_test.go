@@ -1,7 +1,6 @@
 package chain_test
 
 import (
-	"os"
 	"reflect"
 	"testing"
 
@@ -12,16 +11,10 @@ import (
 )
 
 func newTestStore(tb testing.TB, checkpoint consensus.Checkpoint) *chainutil.FlatStore {
-	dir, err := os.MkdirTemp("", tb.Name())
+	fs, _, err := chainutil.NewFlatStore(tb.TempDir(), checkpoint)
 	if err != nil {
 		tb.Fatal(err)
 	}
-	tb.Cleanup(func() { os.RemoveAll(dir) })
-	fs, _, err := chainutil.NewFlatStore(dir, checkpoint)
-	if err != nil {
-		tb.Fatal(err)
-	}
-	tb.Cleanup(func() { fs.Close() })
 	return fs
 }
 
@@ -44,7 +37,8 @@ func TestManager(t *testing.T) {
 	sim := chainutil.NewChainSim()
 
 	store := newTestStore(t, sim.Genesis)
-	cm := chain.NewManager(store, sim.Context)
+	cm := chain.NewManager(store, sim.State)
+	defer cm.Close()
 
 	var hs historySubscriber
 	cm.AddSubscriber(&hs, cm.Tip())
@@ -70,7 +64,7 @@ func TestManager(t *testing.T) {
 
 	// mine 10 blocks on the fork, ensuring that it has more total work, and give them to the manager
 	betterChain := fork.MineBlocks(10)
-	chainutil.FindBlockNonce(&betterChain[9].Header, sunyata.HashRequiringWork(sim.Context.TotalWork))
+	chainutil.FindBlockNonce(fork.State, &betterChain[9].Header, sunyata.HashRequiringWork(sim.State.TotalWork))
 	hs.revertHistory = nil
 	hs.applyHistory = nil
 	if _, err := cm.AddHeaders(chainutil.JustHeaders(betterChain)); err != nil {

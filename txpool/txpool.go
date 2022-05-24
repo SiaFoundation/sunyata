@@ -1,8 +1,8 @@
-// Package txpool provides a transaction pool (or "mempool") for sunyata.
 package txpool
 
 import (
 	"errors"
+	"fmt"
 	"sync"
 
 	"go.sia.tech/sunyata"
@@ -10,12 +10,68 @@ import (
 	"go.sia.tech/sunyata/consensus"
 )
 
+type updater interface {
+	UpdateElementProof(e *sunyata.StateElement)
+}
+
+func updateTxnProofs(txn *sunyata.Transaction, u updater) {
+	for i := range txn.Inputs {
+		if txn.Inputs[i].Parent.LeafIndex != sunyata.EphemeralLeafIndex {
+			u.UpdateElementProof(&txn.Inputs[i].Parent.StateElement)
+		}
+	}
+}
+
+func updateEphemeralInputs(txn *sunyata.Transaction, u updater) {
+	switch u := u.(type) {
+	case *consensus.ApplyUpdate:
+		// if txn spends an ephemeral output that has since been mined, replace
+		// the ephemeral output with the actual element
+		for i := range txn.Inputs {
+			in := &txn.Inputs[i]
+			if in.Parent.LeafIndex == sunyata.EphemeralLeafIndex {
+				for _, sce := range u.NewOutputElements {
+					if sce.ID == in.Parent.ID {
+						in.Parent = sce
+						in.Parent.MerkleProof = append([]sunyata.Hash256(nil), in.Parent.MerkleProof...)
+						break
+					}
+				}
+			}
+		}
+	case *consensus.RevertUpdate:
+		// if txn spends an output belonging to a transaction that has been
+		// returned to the pool, mark the element as ephemeral
+		for i := range txn.Inputs {
+			in := &txn.Inputs[i]
+			for _, sce := range u.NewOutputElements {
+				if sce.ID == in.Parent.ID {
+					in.Parent.LeafIndex = sunyata.EphemeralLeafIndex
+					in.Parent.MerkleProof = nil
+					break
+				}
+			}
+		}
+	default:
+		panic(fmt.Sprintf("invalid updater type: %T", u))
+	}
+}
+
+func txnContainsRevertedElements(txn sunyata.Transaction, cru *chain.RevertUpdate) bool {
+	for i := range txn.Inputs {
+		if cru.OutputElementWasRemoved(txn.Inputs[i].Parent) {
+			return true
+		}
+	}
+	return false
+}
+
 // A Pool holds transactions that may be included in future blocks.
 type Pool struct {
 	txns       map[sunyata.TransactionID]sunyata.Transaction
-	vc         consensus.ValidationContext
-	prevVC     consensus.ValidationContext
-	prevUpdate consensus.StateApplyUpdate
+	cs         consensus.State
+	prevCS     consensus.State
+	prevUpdate consensus.ApplyUpdate
 	mu         sync.Mutex
 }
 
@@ -23,26 +79,22 @@ func (p *Pool) validateTransaction(txn sunyata.Transaction) error {
 	// Perform standard validation checks, with added flexibility: if the
 	// transaction merely has outdated proofs, update them and attempt to
 	// validate again.
-	err := p.vc.ValidateTransaction(txn)
-	if err == consensus.ErrInvalidInputProof && p.prevVC.ValidateTransaction(txn) == nil {
-		for i := range txn.Inputs {
-			p.prevUpdate.UpdateOutputProof(&txn.Inputs[i].Parent)
-		}
-		err = p.vc.ValidateTransaction(txn)
+	err := p.cs.ValidateTransaction(txn)
+	if err != nil && p.prevCS.ValidateTransaction(txn) == nil {
+		updateTxnProofs(&txn, &p.prevUpdate)
+		err = p.cs.ValidateTransaction(txn)
 	}
 	if err != nil {
 		return err
 	}
 
 	// validate ephemeral outputs
-	//
-	// TODO: keep this map around instead of rebuilding it every time
-	available := make(map[sunyata.OutputID]struct{})
+	available := make(map[sunyata.ElementID]struct{})
 	for txid, txn := range p.txns {
 		for i := range txn.Outputs {
-			oid := sunyata.OutputID{
-				TransactionID: txid,
-				Index:         uint64(i),
+			oid := sunyata.ElementID{
+				Source: sunyata.Hash256(txid),
+				Index:  uint64(i),
 			}
 			available[oid] = struct{}{}
 		}
@@ -60,13 +112,7 @@ func (p *Pool) validateTransaction(txn sunyata.Transaction) error {
 	return nil
 }
 
-// AddTransaction validates a transaction and adds it to the pool. If the
-// transaction references ephemeral parent outputs, those outputs must be
-// created by other transactions already in the pool. The transaction's proofs
-// must be up-to-date.
-func (p *Pool) AddTransaction(txn sunyata.Transaction) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+func (p *Pool) addTransaction(txn sunyata.Transaction) error {
 	txid := txn.ID()
 	if _, ok := p.txns[txid]; ok {
 		return nil // already in pool
@@ -77,6 +123,36 @@ func (p *Pool) AddTransaction(txn sunyata.Transaction) error {
 	}
 	p.txns[txid] = txn
 	return nil
+}
+
+// AddTransactionSet validates a transaction set and adds it to the pool. If any
+// transaction references ephemeral parent outputs those parent outputs must be
+// created by transactions in the transaction set or already in the pool. All
+// proofs in the transaction set must be up-to-date.
+func (p *Pool) AddTransactionSet(txns []sunyata.Transaction) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if err := p.cs.ValidateTransactionSet(txns); err != nil {
+		return fmt.Errorf("failed to validate transaction set: %w", err)
+	}
+
+	for i, txn := range txns {
+		if err := p.addTransaction(txn); err != nil {
+			return fmt.Errorf("failed to add transaction %v: %w", i, err)
+		}
+	}
+	return nil
+}
+
+// AddTransaction validates a transaction and adds it to the pool. If the
+// transaction references ephemeral parent outputs, those outputs must be
+// created by other transactions already in the pool. The transaction's proofs
+// must be up-to-date.
+func (p *Pool) AddTransaction(txn sunyata.Transaction) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.addTransaction(txn)
 }
 
 // Transaction returns the transaction with the specified ID, if it is currently
@@ -99,6 +175,13 @@ func (p *Pool) Transactions() []sunyata.Transaction {
 	return txns
 }
 
+// RecommendedFee returns the recommended fee (per weight unit) to ensure a high
+// probability of inclusion in the next block.
+func (p *Pool) RecommendedFee() sunyata.Currency {
+	// TODO: calculate based on current pool, prior blocks, and absolute min/max
+	return sunyata.NewCurrency64(1000)
+}
+
 // ProcessChainApplyUpdate implements chain.Subscriber.
 func (p *Pool) ProcessChainApplyUpdate(cau *chain.ApplyUpdate, _ bool) error {
 	p.mu.Lock()
@@ -110,26 +193,16 @@ func (p *Pool) ProcessChainApplyUpdate(cau *chain.ApplyUpdate, _ bool) error {
 	}
 
 	// update unconfirmed txns
-outer:
 	for id, txn := range p.txns {
-		// if any of the inputs were spent, the txn is now invalid; delete it
-		for i := range txn.Inputs {
-			if cau.OutputWasSpent(txn.Inputs[i].Parent) {
-				delete(p.txns, id)
-				continue outer
-			}
-		}
-		// all inputs still unspent; update proofs
-		for i := range txn.Inputs {
-			cau.UpdateOutputProof(&txn.Inputs[i].Parent)
-		}
+		updateTxnProofs(&txn, &cau.ApplyUpdate)
+		updateEphemeralInputs(&txn, &cau.ApplyUpdate)
 
 		// verify that the transaction is still valid
 		//
 		// NOTE: in theory we should only need to run height-dependent checks
 		// here (e.g. timelocks); but it doesn't hurt to be extra thorough. Easy
 		// to remove later if it becomes a bottleneck.
-		if err := cau.Context.ValidateTransaction(txn); err != nil {
+		if err := cau.State.ValidateTransaction(txn); err != nil {
 			delete(p.txns, id)
 			continue
 		}
@@ -137,9 +210,9 @@ outer:
 		p.txns[id] = txn
 	}
 
-	// update the current and previous validation contexts
-	p.prevVC, p.vc = p.vc, cau.Context
-	p.prevUpdate = cau.StateApplyUpdate
+	// update the current and previous states
+	p.prevCS, p.cs = p.cs, cau.State
+	p.prevUpdate = cau.ApplyUpdate
 	return nil
 }
 
@@ -148,45 +221,38 @@ func (p *Pool) ProcessChainRevertUpdate(cru *chain.RevertUpdate) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// put reverted txns back in the pool
-	for _, txn := range cru.Block.Transactions {
-		p.txns[txn.ID()] = txn
-	}
-
 	// update unconfirmed txns
-outer:
 	for id, txn := range p.txns {
-		// if any of the inputs no longer exist, the txn is now invalid; delete it
-		for i := range txn.Inputs {
-			if cru.OutputWasRemoved(txn.Inputs[i].Parent) {
-				delete(p.txns, id)
-				continue outer
-			}
-		}
-		// all inputs still unspent; update proofs
-		for i := range txn.Inputs {
-			cru.UpdateOutputProof(&txn.Inputs[i].Parent)
-		}
-
-		// verify that the transaction is still valid
-		if err := cru.Context.ValidateTransaction(txn); err != nil {
+		updateEphemeralInputs(&txn, &cru.RevertUpdate)
+		if txnContainsRevertedElements(txn, cru) {
 			delete(p.txns, id)
 			continue
 		}
-
+		updateTxnProofs(&txn, &cru.RevertUpdate)
 		p.txns[id] = txn
+
+		// verify that the transaction is still valid
+		if err := cru.State.ValidateTransaction(txn); err != nil {
+			delete(p.txns, id)
+			continue
+		}
 	}
 
-	// update validation context
-	p.vc = cru.Context
+	// put reverted txns back in the pool
+	for _, txn := range cru.Block.Transactions {
+		p.txns[txn.ID()] = txn.DeepCopy()
+	}
+
+	// update consensus state
+	p.cs = cru.State
 	return nil
 }
 
 // New creates a new transaction pool.
-func New(vc consensus.ValidationContext) *Pool {
+func New(cs consensus.State) *Pool {
 	return &Pool{
 		txns:   make(map[sunyata.TransactionID]sunyata.Transaction),
-		vc:     vc,
-		prevVC: vc,
+		cs:     cs,
+		prevCS: cs,
 	}
 }

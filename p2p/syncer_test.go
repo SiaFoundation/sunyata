@@ -24,11 +24,11 @@ func testPeerResponse(t testing.TB, s *Syncer, m Message) Message {
 func TestSyncer(t *testing.T) {
 	sim := chainutil.NewChainSim()
 
-	n1 := newTestNode(t, sim.Genesis.Context.Index.ID, sim.Genesis)
+	n1 := newTestNode(t, sim.Genesis.State.Index.ID, sim.Genesis)
 	defer n1.Close()
 	go n1.run()
 
-	n2 := newTestNode(t, sim.Genesis.Context.Index.ID, sim.Genesis)
+	n2 := newTestNode(t, sim.Genesis.State.Index.ID, sim.Genesis)
 	defer n2.Close()
 	go n2.run()
 
@@ -75,7 +75,7 @@ func TestSyncer(t *testing.T) {
 
 func TestMsgGetHeaders(t *testing.T) {
 	sim := chainutil.NewChainSim()
-	n := newTestNode(t, sim.Genesis.Context.Index.ID, sim.Genesis)
+	n := newTestNode(t, sim.Genesis.State.Index.ID, sim.Genesis)
 
 	// mine a chain
 	sim.MineBlocks(100)
@@ -129,7 +129,7 @@ func TestMsgGetHeaders(t *testing.T) {
 
 func TestMsgGetBlocks(t *testing.T) {
 	sim := chainutil.NewChainSim()
-	n := newTestNode(t, sim.Genesis.Context.Index.ID, sim.Genesis)
+	n := newTestNode(t, sim.Genesis.State.Index.ID, sim.Genesis)
 
 	// mine a chain
 	sim.MineBlocks(100)
@@ -178,7 +178,7 @@ func TestMsgGetBlocks(t *testing.T) {
 
 func TestMsgRelayBlock(t *testing.T) {
 	sim := chainutil.NewChainSim()
-	n := newTestNode(t, sim.Genesis.Context.Index.ID, sim.Genesis)
+	n := newTestNode(t, sim.Genesis.State.Index.ID, sim.Genesis)
 
 	// add a dummy peer, for testing relay
 	relay := &Peer{cond: sync.Cond{L: new(sync.Mutex)}}

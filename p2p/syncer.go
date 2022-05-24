@@ -109,7 +109,7 @@ func (s *Syncer) handleMsgGetCheckpoint(p *Peer, msg *MsgGetCheckpoint) Message 
 		s.setErr(fmt.Errorf("%T: couldn't load block: %w", msg, err))
 		return nil
 	}
-	vc, err := s.cm.ValidationContext(b.Header.ParentIndex())
+	cs, err := s.cm.State(b.Header.ParentIndex())
 	if errors.Is(err, chain.ErrPruned) {
 		return nil
 	} else if err != nil {
@@ -117,7 +117,7 @@ func (s *Syncer) handleMsgGetCheckpoint(p *Peer, msg *MsgGetCheckpoint) Message 
 		return nil
 	}
 
-	return &MsgCheckpoint{Block: b, ParentContext: vc}
+	return &MsgCheckpoint{Block: b, ParentState: cs}
 }
 
 func (s *Syncer) handleMsgRelayBlock(p *Peer, msg *MsgRelayBlock) Message {

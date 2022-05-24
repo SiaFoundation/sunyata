@@ -2,34 +2,33 @@ package wallet_test
 
 import (
 	"testing"
+	"time"
 
 	"go.sia.tech/sunyata"
 	"go.sia.tech/sunyata/chain"
 	"go.sia.tech/sunyata/internal/chainutil"
 	"go.sia.tech/sunyata/internal/walletutil"
-	"go.sia.tech/sunyata/wallet"
 )
 
 func TestWallet(t *testing.T) {
 	sim := chainutil.NewChainSim()
 
-	cm := chain.NewManager(chainutil.NewEphemeralStore(sim.Genesis), sim.Context)
-	store := walletutil.NewEphemeralStore()
-	cm.AddSubscriber(store, cm.Tip())
-	w := wallet.NewHotWallet(store, wallet.NewSeed())
+	cm := chain.NewManager(chainutil.NewEphemeralStore(sim.Genesis), sim.State)
+	w := walletutil.NewTestingWallet(cm.TipState())
+	cm.AddSubscriber(w, cm.Tip())
 
 	// fund the wallet with 100 coins
-	ourAddr := w.NextAddress()
-	fund := sunyata.Beneficiary{Value: sunyata.BaseUnitsPerCoin.Mul64(100), Address: ourAddr}
-	if err := cm.AddTipBlock(sim.MineBlockWithBeneficiaries(fund)); err != nil {
+	ourAddr := w.NewAddress()
+	fund := sunyata.Output{Value: sunyata.BaseUnitsPerCoin.Mul64(100), Address: ourAddr}
+	if err := cm.AddTipBlock(sim.MineBlockWithOutputs(fund)); err != nil {
 		t.Fatal(err)
 	}
 
-	// wallet should now have a transaction, and output, and a non-zero balance
-	if len(store.Transactions()) != 1 {
-		t.Fatal("expected a single transaction, got", store.Transactions())
-	} else if len(store.SpendableOutputs()) != 1 {
-		t.Fatal("expected a single spendable output, got", store.SpendableOutputs())
+	// wallet should now have a transaction, one element, and a non-zero balance
+	if txns, _ := w.Transactions(time.Time{}, -1); len(txns) != 1 {
+		t.Fatal("expected a single transaction, got", txns)
+	} else if utxos, _ := w.UnspentOutputElements(); len(utxos) != 1 {
+		t.Fatal("expected a single unspent element, got", utxos)
 	} else if w.Balance().IsZero() {
 		t.Fatal("expected non-zero balance after mining")
 	}
@@ -39,14 +38,12 @@ func TestWallet(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		sendAmount := sunyata.BaseUnitsPerCoin.Mul64(7)
 		txn := sunyata.Transaction{
-			Outputs: []sunyata.Beneficiary{{
+			Outputs: []sunyata.Output{{
 				Address: sunyata.VoidAddress,
 				Value:   sendAmount,
 			}},
 		}
-		if toSign, _, err := w.FundTransaction(&txn, sendAmount, nil); err != nil {
-			t.Fatal(err)
-		} else if err := w.SignTransaction(&txn, toSign); err != nil {
+		if err := w.FundAndSign(&txn); err != nil {
 			t.Fatal(err)
 		}
 		prevBalance := w.Balance()

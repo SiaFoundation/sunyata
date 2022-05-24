@@ -1,20 +1,20 @@
 package chainutil
 
 import (
-	"crypto/ed25519"
-	"encoding/binary"
 	"time"
 
 	"go.sia.tech/sunyata"
 	"go.sia.tech/sunyata/consensus"
 )
 
-func FindBlockNonce(h *sunyata.BlockHeader, target sunyata.BlockID) {
+// FindBlockNonce finds a block nonce meeting the target.
+func FindBlockNonce(cs consensus.State, h *sunyata.BlockHeader, target sunyata.BlockID) {
 	for !h.ID().MeetsTarget(target) {
-		binary.LittleEndian.PutUint64(h.Nonce[:], binary.LittleEndian.Uint64(h.Nonce[:])+1)
+		h.Nonce++
 	}
 }
 
+// JustHeaders renters only the headers of each block.
 func JustHeaders(blocks []sunyata.Block) []sunyata.BlockHeader {
 	headers := make([]sunyata.BlockHeader, len(blocks))
 	for i := range headers {
@@ -23,6 +23,7 @@ func JustHeaders(blocks []sunyata.Block) []sunyata.BlockHeader {
 	return headers
 }
 
+// JustTransactions returns only the transactions of each block.
 func JustTransactions(blocks []sunyata.Block) [][]sunyata.Transaction {
 	txns := make([][]sunyata.Transaction, len(blocks))
 	for i := range txns {
@@ -31,6 +32,7 @@ func JustTransactions(blocks []sunyata.Block) [][]sunyata.Transaction {
 	return txns
 }
 
+// JustTransactionIDs returns only the transaction ids included in each block.
 func JustTransactionIDs(blocks []sunyata.Block) [][]sunyata.TransactionID {
 	txns := make([][]sunyata.TransactionID, len(blocks))
 	for i := range txns {
@@ -42,6 +44,7 @@ func JustTransactionIDs(blocks []sunyata.Block) [][]sunyata.TransactionID {
 	return txns
 }
 
+// JustChainIndexes returns only the chain index of each block.
 func JustChainIndexes(blocks []sunyata.Block) []sunyata.ChainIndex {
 	cis := make([]sunyata.ChainIndex, len(blocks))
 	for i := range cis {
@@ -50,29 +53,30 @@ func JustChainIndexes(blocks []sunyata.Block) []sunyata.ChainIndex {
 	return cis
 }
 
+// ChainSim represents a simulation of a blockchain.
 type ChainSim struct {
 	Genesis consensus.Checkpoint
 	Chain   []sunyata.Block
-	Context consensus.ValidationContext
+	State   consensus.State
 
-	nonce [8]byte // for distinguishing forks
+	nonce uint64 // for distinguishing forks
 
 	// for simulating transactions
 	pubkey  sunyata.PublicKey
-	privkey ed25519.PrivateKey
-	outputs []sunyata.Output
+	privkey sunyata.PrivateKey
+	outputs []sunyata.OutputElement
 }
 
+// Fork forks the current chain.
 func (cs *ChainSim) Fork() *ChainSim {
 	cs2 := *cs
 	cs2.Chain = append([]sunyata.Block(nil), cs2.Chain...)
-	cs2.outputs = append([]sunyata.Output(nil), cs2.outputs...)
-	if cs.nonce[7]++; cs.nonce[7] == 0 {
-		cs.nonce[6]++
-	}
+	cs2.outputs = append([]sunyata.OutputElement(nil), cs2.outputs...)
+	cs.nonce += 1 << 48
 	return &cs2
 }
 
+//MineBlockWithTxns mine a block with the given transaction.
 func (cs *ChainSim) MineBlockWithTxns(txns ...sunyata.Transaction) sunyata.Block {
 	prev := cs.Genesis.Block.Header
 	if len(cs.Chain) > 0 {
@@ -88,18 +92,18 @@ func (cs *ChainSim) MineBlockWithTxns(txns ...sunyata.Transaction) sunyata.Block
 		},
 		Transactions: txns,
 	}
-	b.Header.Commitment = cs.Context.Commitment(b.Header.MinerAddress, b.Transactions)
-	FindBlockNonce(&b.Header, sunyata.HashRequiringWork(cs.Context.Difficulty))
+	b.Header.Commitment = cs.State.Commitment(b.Header.MinerAddress, b.Transactions)
+	FindBlockNonce(cs.State, &b.Header, sunyata.HashRequiringWork(cs.State.Difficulty))
 
-	sau := consensus.ApplyBlock(cs.Context, b)
-	cs.Context = sau.Context
+	sau := consensus.ApplyBlock(cs.State, b)
+	cs.State = sau.State
 	cs.Chain = append(cs.Chain, b)
 
 	// update our outputs
 	for i := range cs.outputs {
-		sau.UpdateOutputProof(&cs.outputs[i])
+		sau.UpdateElementProof(&cs.outputs[i].StateElement)
 	}
-	for _, out := range sau.NewOutputs {
+	for _, out := range sau.NewOutputElements {
 		if out.Address == cs.pubkey.Address() {
 			cs.outputs = append(cs.outputs, out)
 		}
@@ -108,14 +112,62 @@ func (cs *ChainSim) MineBlockWithTxns(txns ...sunyata.Transaction) sunyata.Block
 	return b
 }
 
-func (cs *ChainSim) TxnWithBeneficiaries(bs ...sunyata.Beneficiary) sunyata.Transaction {
+// TxnWithOutputs returns a transaction containing the specified outputs.
+// The ChainSim must have funds equal to or exceeding the sum of the outputs.
+func (cs *ChainSim) TxnWithOutputs(scos ...sunyata.Output) sunyata.Transaction {
 	txn := sunyata.Transaction{
-		Outputs:  bs,
-		MinerFee: sunyata.NewCurrency64(cs.Context.Index.Height),
+		Outputs:  scos,
+		MinerFee: sunyata.NewCurrency64(cs.State.Index.Height),
 	}
 
 	totalOut := txn.MinerFee
-	for _, b := range bs {
+	for _, sco := range scos {
+		totalOut = totalOut.Add(sco.Value)
+	}
+
+	// select inputs and compute change output
+	var totalIn sunyata.Currency
+	for i, out := range cs.outputs {
+		txn.Inputs = append(txn.Inputs, sunyata.Input{
+			Parent:    out,
+			PublicKey: cs.pubkey,
+		})
+		totalIn = totalIn.Add(out.Value)
+		if totalIn.Cmp(totalOut) >= 0 {
+			cs.outputs = cs.outputs[i+1:]
+			break
+		}
+	}
+
+	if totalIn.Cmp(totalOut) < 0 {
+		panic("insufficient funds")
+	} else if totalIn.Cmp(totalOut) > 0 {
+		// add change output
+		txn.Outputs = append(txn.Outputs, sunyata.Output{
+			Address: cs.pubkey.Address(),
+			Value:   totalIn.Sub(totalOut),
+		})
+	}
+
+	// sign
+	sigHash := cs.State.InputSigHash(txn)
+	for i := range txn.Inputs {
+		txn.Inputs[i].Signature = cs.privkey.SignHash(sigHash)
+	}
+	return txn
+}
+
+// MineBlockWithOutputs mines a block with a transaction containing the
+// specified outputs. The ChainSim must have funds equal to or exceeding the sum
+// of the outputs.
+func (cs *ChainSim) MineBlockWithOutputs(outs ...sunyata.Output) sunyata.Block {
+	txn := sunyata.Transaction{
+		Outputs:  outs,
+		MinerFee: sunyata.NewCurrency64(cs.State.Index.Height),
+	}
+
+	totalOut := txn.MinerFee
+	for _, b := range outs {
 		totalOut = totalOut.Add(b.Value)
 	}
 
@@ -137,24 +189,21 @@ func (cs *ChainSim) TxnWithBeneficiaries(bs ...sunyata.Beneficiary) sunyata.Tran
 		panic("insufficient funds")
 	} else if totalIn.Cmp(totalOut) > 0 {
 		// add change output
-		txn.Outputs = append(txn.Outputs, sunyata.Beneficiary{
+		txn.Outputs = append(txn.Outputs, sunyata.Output{
 			Address: cs.pubkey.Address(),
 			Value:   totalIn.Sub(totalOut),
 		})
 	}
 
-	// sign
-	sigHash := cs.Context.SigHash(txn)
+	// sign and mine
+	sigHash := cs.State.InputSigHash(txn)
 	for i := range txn.Inputs {
-		txn.Inputs[i].Signature = sunyata.SignTransaction(cs.privkey, sigHash)
+		txn.Inputs[i].Signature = cs.privkey.SignHash(sigHash)
 	}
-	return txn
+	return cs.MineBlockWithTxns(txn)
 }
 
-func (cs *ChainSim) MineBlockWithBeneficiaries(bs ...sunyata.Beneficiary) sunyata.Block {
-	return cs.MineBlockWithTxns(cs.TxnWithBeneficiaries(bs...))
-}
-
+// MineBlock mine an empty block.
 func (cs *ChainSim) MineBlock() sunyata.Block {
 	// simulate chain activity by sending our existing outputs to new addresses
 	var txns []sunyata.Transaction
@@ -164,15 +213,15 @@ func (cs *ChainSim) MineBlock() sunyata.Block {
 				Parent:    out,
 				PublicKey: cs.pubkey,
 			}},
-			Outputs: []sunyata.Beneficiary{
-				{Address: cs.pubkey.Address(), Value: out.Value.Sub(sunyata.NewCurrency64(cs.Context.Index.Height + 1))},
-				{Address: sunyata.Address{cs.nonce[6], cs.nonce[7], 1, 2, 3}, Value: sunyata.NewCurrency64(1)},
+			Outputs: []sunyata.Output{
+				{Address: cs.pubkey.Address(), Value: out.Value.Sub(sunyata.NewCurrency64(cs.State.Index.Height + 1))},
+				{Address: sunyata.Address{byte(cs.nonce >> 48), byte(cs.nonce >> 56), 1, 2, 3}, Value: sunyata.NewCurrency64(1)},
 			},
-			MinerFee: sunyata.NewCurrency64(cs.Context.Index.Height),
+			MinerFee: sunyata.NewCurrency64(cs.State.Index.Height),
 		}
-		sigHash := cs.Context.SigHash(txn)
+		sigHash := cs.State.InputSigHash(txn)
 		for i := range txn.Inputs {
-			txn.Inputs[i].Signature = sunyata.SignTransaction(cs.privkey, sigHash)
+			txn.Inputs[i].Signature = cs.privkey.SignHash(sigHash)
 		}
 
 		txns = append(txns, txn)
@@ -181,6 +230,7 @@ func (cs *ChainSim) MineBlock() sunyata.Block {
 	return cs.MineBlockWithTxns(txns...)
 }
 
+// MineBlocks mine a number of blocks.
 func (cs *ChainSim) MineBlocks(n int) []sunyata.Block {
 	blocks := make([]sunyata.Block, n)
 	for i := range blocks {
@@ -189,15 +239,15 @@ func (cs *ChainSim) MineBlocks(n int) []sunyata.Block {
 	return blocks
 }
 
+// NewChainSim returns a new ChainSim useful for simulating forks.
 func NewChainSim() *ChainSim {
 	// gift ourselves some coins in the genesis block
-	privkey := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
-	var pubkey sunyata.PublicKey
-	copy(pubkey[:], privkey[32:])
+	privkey := sunyata.GeneratePrivateKey()
+	pubkey := privkey.PublicKey()
 	ourAddr := pubkey.Address()
-	gift := make([]sunyata.Beneficiary, 10)
+	gift := make([]sunyata.Output, 10)
 	for i := range gift {
-		gift[i] = sunyata.Beneficiary{
+		gift[i] = sunyata.Output{
 			Address: ourAddr,
 			Value:   sunyata.BaseUnitsPerCoin.Mul64(10 * uint64(i+1)),
 		}
@@ -205,23 +255,23 @@ func NewChainSim() *ChainSim {
 	genesisTxns := []sunyata.Transaction{{Outputs: gift}}
 	genesis := sunyata.Block{
 		Header: sunyata.BlockHeader{
-			Timestamp: time.Unix(734600000, 0),
+			Timestamp: time.Unix(734600000, 0).UTC(),
 		},
 		Transactions: genesisTxns,
 	}
 	sau := consensus.GenesisUpdate(genesis, sunyata.Work{NumHashes: [32]byte{31: 4}})
-	var outputs []sunyata.Output
-	for _, out := range sau.NewOutputs {
+	var outputs []sunyata.OutputElement
+	for _, out := range sau.NewOutputElements {
 		if out.Address == pubkey.Address() {
 			outputs = append(outputs, out)
 		}
 	}
 	return &ChainSim{
 		Genesis: consensus.Checkpoint{
-			Block:   genesis,
-			Context: sau.Context,
+			Block: genesis,
+			State: sau.State,
 		},
-		Context: sau.Context,
+		State:   sau.State,
 		privkey: privkey,
 		pubkey:  pubkey,
 		outputs: outputs,

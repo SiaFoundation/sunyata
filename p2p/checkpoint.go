@@ -57,7 +57,7 @@ func DownloadCheckpoint(ctx context.Context, addr string, genesisID sunyata.Bloc
 	p := &Peer{
 		conn:      conn,
 		handshake: theirs,
-		calls:     make(map[uint32]*Call),
+		calls:     make(map[uint64]*Call),
 	}
 	p.cond.L = &p.mu
 	defer p.disconnect()
@@ -70,16 +70,16 @@ func DownloadCheckpoint(ctx context.Context, addr string, genesisID sunyata.Bloc
 	}
 
 	// validate response
-	if resp.Block.Index() != index || resp.Block.Header.ParentIndex() != resp.ParentContext.Index {
+	if resp.Block.Index() != index || resp.Block.Header.ParentIndex() != resp.ParentState.Index {
 		return consensus.Checkpoint{}, errors.New("wrong checkpoint header")
 	}
-	commitment := resp.ParentContext.Commitment(resp.Block.Header.MinerAddress, resp.Block.Transactions)
+	commitment := resp.ParentState.Commitment(resp.Block.Header.MinerAddress, resp.Block.Transactions)
 	if commitment != resp.Block.Header.Commitment {
 		return consensus.Checkpoint{}, errors.New("wrong checkpoint commitment")
 	}
 
 	return consensus.Checkpoint{
-		Block:   resp.Block,
-		Context: consensus.ApplyBlock(resp.ParentContext, resp.Block).Context,
+		Block: resp.Block,
+		State: consensus.ApplyBlock(resp.ParentState, resp.Block).State,
 	}, nil
 }

@@ -24,33 +24,28 @@ type peerHandshake struct {
 }
 
 func writeHandshake(w io.Writer, m peerHandshake) error {
-	var b msgBuffer
-	b.buf.WriteString("空")
-	b.buf.WriteByte(m.Version)
-	b.write(m.Genesis[:])
-	(*msgChainIndex)(&m.Tip).encodeTo(&b)
-	b.write(m.Key[:])
-	_, err := w.Write(b.buf.Bytes())
-	return err
+	e := sunyata.NewEncoder(w)
+	e.Write([]byte("空"))
+	e.WriteUint8(m.Version)
+	m.Genesis.EncodeTo(e)
+	m.Tip.EncodeTo(e)
+	e.Write(m.Key[:])
+	return e.Flush()
 }
 
 func readHandshake(r io.Reader) (peerHandshake, error) {
-	buf := make([]byte, 3+1+32+msgChainIndexSize+32)
-	if _, err := io.ReadFull(r, buf); err != nil {
-		return peerHandshake{}, err
-	}
-	var b msgBuffer
-	b.write(buf)
-
-	var m peerHandshake
-	if string(b.buf.Next(3)) != "空" {
+	d := sunyata.NewDecoder(io.LimitedReader{R: r, N: 1e6})
+	var magic [3]byte
+	d.Read(magic[:])
+	if string(magic[:]) != "空" {
 		return peerHandshake{}, errors.New("wrong magic bytes")
 	}
-	m.Version, _ = b.buf.ReadByte()
-	b.read(m.Genesis[:])
-	(*msgChainIndex)(&m.Tip).decodeFrom(&b)
-	b.read(m.Key[:])
-	return m, b.err
+	var m peerHandshake
+	m.Version = d.ReadUint8()
+	m.Genesis.DecodeFrom(d)
+	m.Tip.DecodeFrom(d)
+	d.Read(m.Key[:])
+	return m, d.Err()
 }
 
 // A Peer is another node on the network that the Syncer is connected to.
@@ -59,8 +54,8 @@ type Peer struct {
 	handshake peerHandshake
 	in        []taggedMessage
 	out       []taggedMessage
-	nextID    uint32
-	calls     map[uint32]*Call
+	nextID    uint64
+	calls     map[uint64]*Call
 	err       error
 	mu        sync.Mutex
 	cond      sync.Cond // shares mu
@@ -183,14 +178,14 @@ func (p *Peer) disconnect() {
 	p.cond.L.Unlock()
 }
 
-func (p *Peer) newID() uint32 {
+func (p *Peer) newID() uint64 {
 	id := p.nextID
 	p.nextID += 2
 	return id
 }
 
 type Call struct {
-	id   uint32
+	id   uint64
 	done bool
 	resp Message
 	err  error
@@ -372,12 +367,10 @@ func (s *Syncer) addPeer(conn net.Conn, ours, theirs peerHandshake) error {
 		}
 	}
 
-	// TODO: derive shared secret and encrypt connection
-
 	p := &Peer{
 		conn:      conn,
 		handshake: theirs,
-		calls:     make(map[uint32]*Call),
+		calls:     make(map[uint64]*Call),
 	}
 	p.cond.L = &p.mu
 	s.peers = append(s.peers, p)

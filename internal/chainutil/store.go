@@ -1,17 +1,17 @@
 package chainutil
 
 import (
-	"bytes"
-	"encoding/binary"
+	"bufio"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"time"
 
 	"go.sia.tech/sunyata"
 	"go.sia.tech/sunyata/chain"
 	"go.sia.tech/sunyata/consensus"
+	"go.sia.tech/sunyata/merkle"
 )
 
 // EphemeralStore implements chain.ManagerStore in memory.
@@ -22,7 +22,7 @@ type EphemeralStore struct {
 
 // AddCheckpoint implements chain.ManagerStore.
 func (es *EphemeralStore) AddCheckpoint(c consensus.Checkpoint) error {
-	es.entries[c.Context.Index] = c
+	es.entries[c.State.Index] = c
 	return nil
 }
 
@@ -68,11 +68,14 @@ func (es *EphemeralStore) BestIndex(height uint64) (sunyata.ChainIndex, error) {
 // Flush implements chain.ManagerStore.
 func (es *EphemeralStore) Flush() error { return nil }
 
+// Close implements chain.ManagerStore.
+func (es *EphemeralStore) Close() error { return nil }
+
 // NewEphemeralStore returns an in-memory chain.ManagerStore.
 func NewEphemeralStore(c consensus.Checkpoint) *EphemeralStore {
 	return &EphemeralStore{
-		entries: map[sunyata.ChainIndex]consensus.Checkpoint{c.Context.Index: c},
-		best:    []sunyata.ChainIndex{c.Context.Index},
+		entries: map[sunyata.ChainIndex]consensus.Checkpoint{c.State.Index: c},
+		best:    []sunyata.ChainIndex{c.State.Index},
 	}
 }
 
@@ -99,18 +102,18 @@ type FlatStore struct {
 func (fs *FlatStore) AddCheckpoint(c consensus.Checkpoint) error {
 	offset, err := fs.entryFile.Seek(0, io.SeekEnd)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to seek: %w", err)
 	}
 	if err := writeCheckpoint(fs.entryFile, c); err != nil {
-		return err
-	} else if err := writeIndex(fs.indexFile, c.Context.Index, offset); err != nil {
-		return err
+		return fmt.Errorf("failed to write checkpoint: %w", err)
+	} else if err := writeIndex(fs.indexFile, c.State.Index, offset); err != nil {
+		return fmt.Errorf("failed to write index: %w", err)
 	}
 	stat, err := fs.entryFile.Stat()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to stat file: %w", err)
 	}
-	fs.offsets[c.Context.Index] = offset
+	fs.offsets[c.State.Index] = offset
 	fs.meta.entrySize = stat.Size()
 	fs.meta.indexSize += indexSize
 	return nil
@@ -121,40 +124,39 @@ func (fs *FlatStore) Checkpoint(index sunyata.ChainIndex) (c consensus.Checkpoin
 	if offset, ok := fs.offsets[index]; !ok {
 		return consensus.Checkpoint{}, chain.ErrUnknownIndex
 	} else if _, err := fs.entryFile.Seek(offset, io.SeekStart); err != nil {
-		return consensus.Checkpoint{}, err
+		return consensus.Checkpoint{}, fmt.Errorf("failed to seek entry file: %w", err)
 	}
-	err = readCheckpoint(fs.entryFile, &c)
+	err = readCheckpoint(bufio.NewReader(fs.entryFile), &c)
+	if err != nil {
+		return consensus.Checkpoint{}, fmt.Errorf("failed to read checkpoint: %w", err)
+	}
 	return
 }
 
 // Header implements chain.ManagerStore.
 func (fs *FlatStore) Header(index sunyata.ChainIndex) (sunyata.BlockHeader, error) {
-	b := make([]byte, 8+32+8+8+32+32)
+	b := make([]byte, 1+8+32+8+8+32+32)
 	if offset, ok := fs.offsets[index]; !ok {
 		return sunyata.BlockHeader{}, chain.ErrUnknownIndex
 	} else if _, err := fs.entryFile.ReadAt(b, offset); err != nil {
-		return sunyata.BlockHeader{}, err
+		return sunyata.BlockHeader{}, fmt.Errorf("failed to read header at offset %v: %w", offset, err)
 	}
-	buf := bytes.NewBuffer(b)
-	readUint64 := func() uint64 {
-		return binary.LittleEndian.Uint64(buf.Next(8))
+	d := sunyata.NewBufDecoder(b)
+	if version := d.ReadUint8(); version != 1 {
+		return sunyata.BlockHeader{}, fmt.Errorf("unsupported block version (%v)", version)
 	}
-
 	var h sunyata.BlockHeader
-	h.Height = readUint64()
-	buf.Read(h.ParentID[:])
-	buf.Read(h.Nonce[:])
-	h.Timestamp = time.Unix(int64(readUint64()), 0)
-	buf.Read(h.MinerAddress[:])
-	buf.Read(h.Commitment[:])
-
+	h.DecodeFrom(d)
+	if err := d.Err(); err != nil {
+		return sunyata.BlockHeader{}, fmt.Errorf("failed to decode header: %w", err)
+	}
 	return h, nil
 }
 
 // ExtendBest implements chain.ManagerStore.
 func (fs *FlatStore) ExtendBest(index sunyata.ChainIndex) error {
 	if err := writeBest(fs.bestFile, index); err != nil {
-		return err
+		return fmt.Errorf("failed to write to store: %w", err)
 	}
 	fs.meta.tip = index
 	return nil
@@ -164,11 +166,11 @@ func (fs *FlatStore) ExtendBest(index sunyata.ChainIndex) error {
 func (fs *FlatStore) RewindBest() error {
 	index, err := fs.BestIndex(fs.meta.tip.Height - 1)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get parent index %v: %w", fs.meta.tip.Height-1, err)
 	} else if off, err := fs.bestFile.Seek(-bestSize, io.SeekEnd); err != nil {
-		return err
+		return fmt.Errorf("failed to seek best file: %w", err)
 	} else if err := fs.bestFile.Truncate(off); err != nil {
-		return err
+		return fmt.Errorf("failed to truncate file: %w", err)
 	}
 	fs.meta.tip = index
 	return nil
@@ -183,37 +185,43 @@ func (fs *FlatStore) BestIndex(height uint64) (index sunyata.ChainIndex, err err
 	buf := make([]byte, bestSize)
 	if _, err = fs.bestFile.ReadAt(buf, offset); err == io.EOF {
 		err = chain.ErrUnknownIndex
+		return
 	}
-	index.Height = readUint64(buf[:8])
-	copy(index.ID[:], buf[8:40])
-	return
+
+	d := sunyata.NewBufDecoder(buf)
+	index.DecodeFrom(d)
+	if err = d.Err(); err != nil {
+		err = fmt.Errorf("failed to decode index: %w", err)
+		return
+	}
+	return index, nil
 }
 
 // Flush implements chain.ManagerStore.
 func (fs *FlatStore) Flush() error {
 	// TODO: also sync parent directory?
 	if err := fs.indexFile.Sync(); err != nil {
-		return err
+		return fmt.Errorf("failed to sync index file: %w", err)
 	} else if err := fs.entryFile.Sync(); err != nil {
-		return err
+		return fmt.Errorf("failed to sync entry file: %w", err)
 	} else if err := fs.bestFile.Sync(); err != nil {
-		return err
+		return fmt.Errorf("failed to sync best file: %w", err)
 	}
 
 	// atomically update metafile
 	f, err := os.OpenFile(fs.metapath+"_tmp", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0660)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to open tmp file: %w", err)
 	}
 	defer f.Close()
 	if err := writeMeta(f, fs.meta); err != nil {
-		return err
+		return fmt.Errorf("failed to write meta tmp: %w", err)
 	} else if f.Sync(); err != nil {
-		return err
+		return fmt.Errorf("failed to sync meta tmp: %w", err)
 	} else if f.Close(); err != nil {
-		return err
+		return fmt.Errorf("failed to close meta tmp: %w", err)
 	} else if err := os.Rename(fs.metapath+"_tmp", fs.metapath); err != nil {
-		return err
+		return fmt.Errorf("failed to rename meta tmp: %w", err)
 	}
 
 	return nil
@@ -223,24 +231,24 @@ func (fs *FlatStore) recoverBest(tip sunyata.ChainIndex) error {
 	// if the store is empty, wipe the bestFile too
 	if len(fs.offsets) == 0 {
 		if err := fs.bestFile.Truncate(0); err != nil {
-			return err
+			return fmt.Errorf("failed to truncate best file: %w", err)
 		}
 		return nil
 	}
 
 	// truncate to multiple of bestSize
 	if stat, err := fs.bestFile.Stat(); err != nil {
-		return err
+		return fmt.Errorf("failed to stat best file: %w", err)
 	} else if n := stat.Size() / bestSize; n%bestSize != 0 {
 		if err := fs.bestFile.Truncate(n * bestSize); err != nil {
-			return err
+			return fmt.Errorf("failed to truncate best file: %w", err)
 		}
 	}
 
 	// initialize base
 	base, err := readBest(fs.bestFile)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to initialize best index: %w", err)
 	}
 	fs.base = base
 
@@ -249,40 +257,42 @@ func (fs *FlatStore) recoverBest(tip sunyata.ChainIndex) error {
 	index := tip
 	var path []sunyata.ChainIndex
 	for {
-		if bestIndex, err := fs.BestIndex(index.Height); !errors.Is(err, chain.ErrUnknownIndex) {
-			return err
+		if bestIndex, err := fs.BestIndex(index.Height); err != nil && !errors.Is(err, chain.ErrUnknownIndex) {
+			return fmt.Errorf("failed to get index at %v: %w", index.Height, err)
+		} else if err == nil {
+			return nil
 		} else if bestIndex == index {
 			break
 		}
 		path = append(path, index)
 		h, err := fs.Header(index)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to get block header %v: %w", index, err)
 		}
 		index = h.ParentIndex()
 	}
 	// truncate and extend
 	if err := fs.bestFile.Truncate(int64(index.Height-base.Height) * bestSize); err != nil {
-		return err
+		return fmt.Errorf("failed to truncate best file (%v - %v): %w", index.Height, base.Height, err)
 	}
 	for i := len(path) - 1; i >= 0; i-- {
 		if err := fs.ExtendBest(path[i]); err != nil {
-			return err
+			return fmt.Errorf("failed to extend best file %v: %w", path[i], err)
 		}
 	}
 
 	return nil
 }
 
-func (fs *FlatStore) Close() error {
+// Close closes the store.
+func (fs *FlatStore) Close() (err error) {
 	errs := []error{
-		fs.Flush(),
-		fs.indexFile.Close(),
-		fs.entryFile.Close(),
-		fs.bestFile.Close(),
+		fmt.Errorf("error closing index file: %w", fs.indexFile.Close()),
+		fmt.Errorf("error closing entry file: %w", fs.entryFile.Close()),
+		fmt.Errorf("error closing best file: %w", fs.bestFile.Close()),
 	}
 	for _, err := range errs {
-		if err != nil {
+		if errors.Unwrap(err) != nil {
 			return err
 		}
 	}
@@ -293,29 +303,29 @@ func (fs *FlatStore) Close() error {
 func NewFlatStore(dir string, c consensus.Checkpoint) (*FlatStore, consensus.Checkpoint, error) {
 	indexFile, err := os.OpenFile(filepath.Join(dir, "index.dat"), os.O_CREATE|os.O_RDWR, 0o660)
 	if err != nil {
-		return nil, consensus.Checkpoint{}, err
+		return nil, consensus.Checkpoint{}, fmt.Errorf("unable to open index file: %w", err)
 	}
 	entryFile, err := os.OpenFile(filepath.Join(dir, "entry.dat"), os.O_CREATE|os.O_RDWR, 0o660)
 	if err != nil {
-		return nil, consensus.Checkpoint{}, err
+		return nil, consensus.Checkpoint{}, fmt.Errorf("unable to open entry file: %w", err)
 	}
 	bestFile, err := os.OpenFile(filepath.Join(dir, "best.dat"), os.O_CREATE|os.O_RDWR, 0o660)
 	if err != nil {
-		return nil, consensus.Checkpoint{}, err
+		return nil, consensus.Checkpoint{}, fmt.Errorf("unable to open best file: %w", err)
 	}
 
 	// trim indexFile and entryFile according to metadata
 	metapath := filepath.Join(dir, "meta.dat")
 	meta, err := readMetaFile(metapath)
-	if os.IsNotExist(err) {
+	if errors.Is(err, os.ErrNotExist) {
 		// initial metadata
-		meta = metadata{tip: c.Context.Index}
+		meta = metadata{tip: c.State.Index}
 	} else if err != nil {
-		return nil, consensus.Checkpoint{}, err
+		return nil, consensus.Checkpoint{}, fmt.Errorf("unable to read meta file %s: %w", metapath, err)
 	} else if err := indexFile.Truncate(meta.indexSize); err != nil {
-		return nil, consensus.Checkpoint{}, err
+		return nil, consensus.Checkpoint{}, fmt.Errorf("failed to truncate meta index: %w", err)
 	} else if err := entryFile.Truncate(meta.entrySize); err != nil {
-		return nil, consensus.Checkpoint{}, err
+		return nil, consensus.Checkpoint{}, fmt.Errorf("failed to truncate meta entrry: %w", err)
 	}
 
 	// read index entries into map
@@ -325,7 +335,7 @@ func NewFlatStore(dir string, c consensus.Checkpoint) (*FlatStore, consensus.Che
 		if err == io.EOF {
 			break
 		} else if err != nil {
-			return nil, consensus.Checkpoint{}, err
+			return nil, consensus.Checkpoint{}, fmt.Errorf("failed to read index: %w", err)
 		}
 		offsets[index] = offset
 	}
@@ -338,295 +348,115 @@ func NewFlatStore(dir string, c consensus.Checkpoint) (*FlatStore, consensus.Che
 		meta:     meta,
 		metapath: metapath,
 
-		base:    c.Context.Index,
+		base:    c.State.Index,
 		offsets: offsets,
 	}
 
 	// recover bestFile, if necessary
 	if err := fs.recoverBest(meta.tip); err != nil {
-		return nil, consensus.Checkpoint{}, err
+		return nil, consensus.Checkpoint{}, fmt.Errorf("unable to recover best at %v: %w", meta.tip, err)
 	}
 	if _, err := fs.bestFile.Seek(0, io.SeekEnd); err != nil {
-		return nil, consensus.Checkpoint{}, err
+		return nil, consensus.Checkpoint{}, fmt.Errorf("unable to seek to end of best file: %w", err)
 	}
 
 	// if store is empty, write base entry
 	if len(fs.offsets) == 0 {
 		if err := fs.AddCheckpoint(c); err != nil {
-			return nil, consensus.Checkpoint{}, err
-		} else if err := fs.ExtendBest(c.Context.Index); err != nil {
-			return nil, consensus.Checkpoint{}, err
+			return nil, consensus.Checkpoint{}, fmt.Errorf("unable to write checkpoint for %v: %w", c.State.Index, err)
+		} else if err := fs.ExtendBest(c.State.Index); err != nil {
+			return nil, consensus.Checkpoint{}, fmt.Errorf("failed to extend best for %v: %w", c.State.Index, err)
 		}
 		return fs, c, nil
 	}
 
 	c, err = fs.Checkpoint(meta.tip)
 	if err != nil {
-		return nil, consensus.Checkpoint{}, err
+		return nil, consensus.Checkpoint{}, fmt.Errorf("unable to get checkpoint %v: %w", meta.tip, err)
 	}
 	return fs, c, nil
 }
 
-const bestSize = 40
-const indexSize = 48
-const metaSize = 56
+const (
+	bestSize  = 40
+	indexSize = 48
+	metaSize  = 56
+)
 
-func writeUint64(buf []byte, u uint64) { binary.LittleEndian.PutUint64(buf, u) }
-func readUint64(buf []byte) uint64     { return binary.LittleEndian.Uint64(buf) }
+func bufferedDecoder(r io.Reader, size int) (*sunyata.Decoder, error) {
+	buf := make([]byte, size)
+	_, err := io.ReadFull(r, buf)
+	return sunyata.NewBufDecoder(buf), err
+}
 
 func writeMeta(w io.Writer, meta metadata) error {
-	buf := make([]byte, metaSize)
-	writeUint64(buf[0:], uint64(meta.indexSize))
-	writeUint64(buf[8:], uint64(meta.entrySize))
-	writeUint64(buf[16:], meta.tip.Height)
-	copy(buf[24:], meta.tip.ID[:])
-	_, err := w.Write(buf)
-	return err
+	e := sunyata.NewEncoder(w)
+	e.WriteUint64(uint64(meta.indexSize))
+	e.WriteUint64(uint64(meta.entrySize))
+	meta.tip.EncodeTo(e)
+	return e.Flush()
 }
 
 func readMeta(r io.Reader) (meta metadata, err error) {
-	buf := make([]byte, metaSize)
-	if _, err = io.ReadFull(r, buf); err != nil {
-		return
-	}
-	meta.indexSize = int64(binary.LittleEndian.Uint64(buf[0:]))
-	meta.entrySize = int64(binary.LittleEndian.Uint64(buf[8:]))
-	meta.tip.Height = binary.LittleEndian.Uint64(buf[16:])
-	copy(meta.tip.ID[:], buf[24:])
+	d, err := bufferedDecoder(r, metaSize)
+	meta.indexSize = int64(d.ReadUint64())
+	meta.entrySize = int64(d.ReadUint64())
+	meta.tip.DecodeFrom(d)
 	return
 }
 
 func readMetaFile(path string) (meta metadata, err error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return metadata{}, err
+		return metadata{}, fmt.Errorf("unable to open metafile %s: %w", path, err)
 	}
 	defer f.Close()
-	return readMeta(f)
+	meta, err = readMeta(f)
+	if err != nil {
+		err = fmt.Errorf("unable to read meta file %s: %w", path, err)
+	}
+	return
 }
 
 func writeBest(w io.Writer, index sunyata.ChainIndex) error {
-	buf := make([]byte, bestSize)
-	writeUint64(buf[:8], index.Height)
-	copy(buf[8:40], index.ID[:])
-	_, err := w.Write(buf)
-	return err
+	e := sunyata.NewEncoder(w)
+	index.EncodeTo(e)
+	return e.Flush()
 }
 
 func readBest(r io.Reader) (index sunyata.ChainIndex, err error) {
-	buf := make([]byte, bestSize)
-	if _, err = io.ReadFull(r, buf); err != nil {
-		return
-	}
-	index.Height = readUint64(buf[:8])
-	copy(index.ID[:], buf[8:40])
+	d, err := bufferedDecoder(r, bestSize)
+	index.DecodeFrom(d)
 	return
 }
 
 func writeIndex(w io.Writer, index sunyata.ChainIndex, offset int64) error {
-	buf := make([]byte, indexSize)
-	writeUint64(buf[:8], index.Height)
-	copy(buf[8:40], index.ID[:])
-	writeUint64(buf[40:48], uint64(offset))
-	_, err := w.Write(buf)
-	return err
+	e := sunyata.NewEncoder(w)
+	index.EncodeTo(e)
+	e.WriteUint64(uint64(offset))
+	return e.Flush()
 }
 
 func readIndex(r io.Reader) (index sunyata.ChainIndex, offset int64, err error) {
-	buf := make([]byte, indexSize)
-	if _, err = io.ReadFull(r, buf); err != nil {
-		return
-	}
-	index.Height = readUint64(buf[:8])
-	copy(index.ID[:], buf[8:40])
-	offset = int64(readUint64(buf[40:48]))
+	d, err := bufferedDecoder(r, indexSize)
+	index.DecodeFrom(d)
+	offset = int64(d.ReadUint64())
 	return
 }
 
 func writeCheckpoint(w io.Writer, c consensus.Checkpoint) error {
-	// encoding helpers
-	var buf bytes.Buffer
-	write := func(p []byte) { buf.Write(p) }
-	writeHash := func(h [32]byte) { buf.Write(h[:]) }
-	writeUint64 := func(u uint64) {
-		b := make([]byte, 8)
-		binary.LittleEndian.PutUint64(b, u)
-		buf.Write(b)
-	}
-	writeInt := func(i int) { writeUint64(uint64(i)) }
-	writeTime := func(t time.Time) { writeUint64(uint64(t.Unix())) }
-	writeCurrency := func(c sunyata.Currency) {
-		writeUint64(c.Lo)
-		writeUint64(c.Hi)
-	}
-	writeOutputID := func(id sunyata.OutputID) {
-		writeHash(id.TransactionID)
-		writeUint64(id.Index)
-	}
-
-	// write header
-	h := c.Block.Header
-	writeUint64(h.Height)
-	writeHash(h.ParentID)
-	write(h.Nonce[:])
-	writeTime(h.Timestamp)
-	writeHash(h.MinerAddress)
-	writeHash(h.Commitment)
-
-	// write txns
-	writeInt(len(c.Block.Transactions))
-	for _, txn := range c.Block.Transactions {
-		writeInt(len(txn.Inputs))
-		for j := range txn.Inputs {
-			in := &txn.Inputs[j]
-			writeOutputID(in.Parent.ID)
-			writeCurrency(in.Parent.Value)
-			writeHash(in.Parent.Address)
-			writeUint64(in.Parent.Timelock)
-			writeInt(len(in.Parent.MerkleProof))
-			writeUint64(in.Parent.LeafIndex)
-			writeHash(in.PublicKey)
-			write(in.Signature[:])
-		}
-		writeInt(len(txn.Outputs))
-		for j := range txn.Outputs {
-			out := &txn.Outputs[j]
-			writeCurrency(out.Value)
-			writeHash(out.Address)
-		}
-		writeCurrency(txn.MinerFee)
-	}
-
-	// write multiproof
-	proof := consensus.ComputeMultiproof(c.Block.Transactions)
-	for _, p := range proof {
-		writeHash(p)
-	}
-
-	// write context
-	vc := c.Context
-	writeUint64(vc.Index.Height)
-	writeHash(vc.Index.ID)
-	writeUint64(vc.State.NumLeaves)
-	for i := range vc.State.Trees {
-		if vc.State.HasTreeAtHeight(i) {
-			writeHash(vc.State.Trees[i])
-		}
-	}
-	writeUint64(vc.History.NumLeaves)
-	for i := range vc.History.Trees {
-		if vc.History.HasTreeAtHeight(i) {
-			writeHash(vc.History.Trees[i])
-		}
-	}
-	writeHash(vc.TotalWork.NumHashes)
-	writeHash(vc.Difficulty.NumHashes)
-	writeTime(vc.LastAdjust)
-	for i := range vc.PrevTimestamps {
-		writeTime(vc.PrevTimestamps[i])
-	}
-
-	_, err := w.Write(buf.Bytes())
-	return err
+	e := sunyata.NewEncoder(w)
+	(merkle.CompressedBlock)(c.Block).EncodeTo(e)
+	c.State.EncodeTo(e)
+	return e.Flush()
 }
 
 func readCheckpoint(r io.Reader, c *consensus.Checkpoint) error {
-	// decoding helpers + sticky error
-	buf := make([]byte, 8)
-	var err error
-	read := func(p []byte) {
-		if err == nil {
-			_, err = io.ReadFull(r, p)
-		}
-	}
-	readHash := func() (h [32]byte) {
-		read(h[:])
-		return
-	}
-	readUint64 := func() uint64 {
-		read(buf[:8])
-		if err != nil {
-			// returning 0 means we won't allocate any more slice memory after
-			// we encounter an error
-			return 0
-		}
-		return binary.LittleEndian.Uint64(buf[:8])
-	}
-	readTime := func() time.Time { return time.Unix(int64(readUint64()), 0) }
-	readCurrency := func() (c sunyata.Currency) {
-		return sunyata.NewCurrency(readUint64(), readUint64())
-	}
-	readOutputID := func() sunyata.OutputID {
-		return sunyata.OutputID{
-			TransactionID: readHash(),
-			Index:         readUint64(),
-		}
-	}
-
-	// read header
-	h := &c.Block.Header
-	h.Height = readUint64()
-	h.ParentID = readHash()
-	read(h.Nonce[:])
-	h.Timestamp = readTime()
-	h.MinerAddress = readHash()
-	h.Commitment = readHash()
-
-	// read txns
-	c.Block.Transactions = make([]sunyata.Transaction, readUint64())
-	for i := range c.Block.Transactions {
-		txn := &c.Block.Transactions[i]
-		txn.Inputs = make([]sunyata.Input, readUint64())
-		for j := range txn.Inputs {
-			in := &txn.Inputs[j]
-			in.Parent.ID = readOutputID()
-			in.Parent.Value = readCurrency()
-			in.Parent.Address = readHash()
-			in.Parent.Timelock = readUint64()
-			in.Parent.MerkleProof = make([]sunyata.Hash256, readUint64())
-			in.Parent.LeafIndex = readUint64()
-			in.PublicKey = readHash()
-			read(in.Signature[:])
-		}
-		txn.Outputs = make([]sunyata.Beneficiary, readUint64())
-		for j := range txn.Outputs {
-			out := &txn.Outputs[j]
-			out.Value = readCurrency()
-			out.Address = readHash()
-		}
-		txn.MinerFee = readCurrency()
-	}
-
-	// read multiproof
-	proofLen := consensus.MultiproofSize(c.Block.Transactions)
-	proof := make([]sunyata.Hash256, proofLen)
-	for i := range proof {
-		proof[i] = readHash()
-	}
-	consensus.ExpandMultiproof(c.Block.Transactions, proof)
-
-	// read context
-	vc := &c.Context
-	vc.Index.Height = readUint64()
-	vc.Index.ID = readHash()
-	vc.State.NumLeaves = readUint64()
-	for i := range vc.State.Trees {
-		if vc.State.HasTreeAtHeight(i) {
-			vc.State.Trees[i] = readHash()
-		}
-	}
-	vc.History.NumLeaves = readUint64()
-	for i := range vc.History.Trees {
-		if vc.History.HasTreeAtHeight(i) {
-			vc.History.Trees[i] = readHash()
-		}
-	}
-	vc.TotalWork.NumHashes = readHash()
-	vc.Difficulty.NumHashes = readHash()
-	vc.LastAdjust = readTime()
-	for i := range vc.PrevTimestamps {
-		vc.PrevTimestamps[i] = readTime()
-	}
-
-	return err
+	d := sunyata.NewDecoder(io.LimitedReader{
+		R: r,
+		N: 10e6, // a checkpoint should never be anywhere near this large
+	})
+	(*merkle.CompressedBlock)(&c.Block).DecodeFrom(d)
+	c.State.DecodeFrom(d)
+	return d.Err()
 }

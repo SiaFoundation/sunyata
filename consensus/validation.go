@@ -2,164 +2,26 @@
 package consensus
 
 import (
-	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"sort"
-	"sync"
 	"time"
 
 	"go.sia.tech/sunyata"
 )
 
 var (
-	// ErrFutureBlock is returned by AppendHeader if a block's timestamp is too far
-	// in the future. The block may be valid at a later time.
-	ErrFutureBlock = errors.New("timestamp is too far in the future")
-
 	// ErrOverweight is returned when a block's weight exceeds MaxBlockWeight.
 	ErrOverweight = errors.New("block is too heavy")
 
-	// ErrInvalidInputProof is returned when a transaction contains an input
-	// with an invalid Merkle proof.
-	ErrInvalidInputProof = errors.New("transaction contains an invalid input proof")
+	// ErrOverflow is returned when the sum of a transaction's inputs and/or
+	// outputs overflows the Currency representation.
+	ErrOverflow = errors.New("sum of currency values overflowed")
 )
 
-// Pool for reducing heap allocations when hashing. This are only necessary
-// because sha512.New512_256 returns a hash.Hash interface, which prevents the
-// compiler from doing escape analysis. Can be removed if we switch to an
-// implementation whose constructor returns a concrete type.
-var hasherPool = &sync.Pool{New: func() interface{} { return sunyata.NewHasher() }}
-
-// ValidationContext contains the necessary context to fully validate a block.
-type ValidationContext struct {
-	Index          sunyata.ChainIndex
-	State          StateAccumulator
-	History        HistoryAccumulator
-	TotalWork      sunyata.Work
-	Difficulty     sunyata.Work
-	LastAdjust     time.Time
-	PrevTimestamps [11]time.Time
-}
-
-// BlockReward returns the reward for mining a child block.
-func (vc *ValidationContext) BlockReward() sunyata.Currency {
-	r := sunyata.BaseUnitsPerCoin.Mul64(50)
-	n := (vc.Index.Height + 1) / 210000
-	return sunyata.NewCurrency(r.Lo>>n|r.Hi<<(64-n), r.Hi>>n) // r >> n
-}
-
-// BlockRewardTimelock is the height at which a child block's reward becomes
-// spendable.
-func (vc *ValidationContext) BlockRewardTimelock() uint64 {
-	return (vc.Index.Height + 1) + 144
-}
-
-// MaxBlockWeight is the maximum "weight" of a valid child block.
-func (vc *ValidationContext) MaxBlockWeight() uint64 {
-	return 100e3
-}
-
-// TransactionWeight computes the weight of a txn.
-func (vc *ValidationContext) TransactionWeight(txn sunyata.Transaction) uint64 {
-	return uint64(4*len(txn.Inputs) + len(txn.Outputs))
-}
-
-// BlockWeight computes the combined weight of a block's txns.
-func (vc *ValidationContext) BlockWeight(txns []sunyata.Transaction) uint64 {
-	var weight uint64
-	for _, txn := range txns {
-		weight += vc.TransactionWeight(txn)
-	}
-	return weight
-}
-
-// Commitment computes the commitment hash for a child block.
-func (vc *ValidationContext) Commitment(minerAddr sunyata.Address, txns []sunyata.Transaction) sunyata.Hash256 {
-	h := hasherPool.Get().(*sunyata.Hasher)
-	defer hasherPool.Put(h)
-	h.Reset()
-
-	// instead of hashing all the data together, hash vc and txns separately;
-	// this makes it possible to cheaply verify *just* the txns, or *just* the
-	// minerAddr, etc.
-
-	h.WriteChainIndex(vc.Index)
-	h.WriteUint64(vc.State.NumLeaves)
-	for i, root := range vc.State.Trees {
-		if vc.State.HasTreeAtHeight(i) {
-			h.WriteHash(root)
-		}
-	}
-	h.WriteUint64(vc.History.NumLeaves)
-	for i, root := range vc.History.Trees {
-		if vc.History.HasTreeAtHeight(i) {
-			h.WriteHash(root)
-		}
-	}
-	h.WriteHash(vc.TotalWork.NumHashes)
-	h.WriteHash(vc.Difficulty.NumHashes)
-	h.WriteTime(vc.LastAdjust)
-	for _, ts := range vc.PrevTimestamps {
-		h.WriteTime(ts)
-	}
-	ctxHash := h.Sum()
-
-	h.Reset()
-	for _, txn := range txns {
-		for _, in := range txn.Inputs {
-			h.WriteOutputID(in.Parent.ID)
-			h.WriteCurrency(in.Parent.Value)
-			h.WriteHash(in.Parent.Address)
-			h.WriteUint64(in.Parent.Timelock)
-			for _, p := range in.Parent.MerkleProof {
-				h.WriteHash(p)
-			}
-			h.WriteUint64(in.Parent.LeafIndex)
-			h.WriteHash(in.PublicKey)
-			h.Write(in.Signature[:])
-		}
-		for _, out := range txn.Outputs {
-			h.WriteCurrency(out.Value)
-			h.WriteHash(out.Address)
-		}
-		h.WriteCurrency(txn.MinerFee)
-	}
-	txnsHash := h.Sum()
-
-	h.Reset()
-	h.WriteHash(ctxHash)
-	h.WriteHash(minerAddr)
-	h.WriteHash(txnsHash)
-	return h.Sum()
-}
-
-// SigHash returns the hash that must be signed for each transaction input.
-func (vc *ValidationContext) SigHash(txn sunyata.Transaction) sunyata.Hash256 {
-	h := hasherPool.Get().(*sunyata.Hasher)
-	defer hasherPool.Put(h)
-	h.Reset()
-	for _, in := range txn.Inputs {
-		h.WriteOutputID(in.Parent.ID)
-	}
-	for i := range txn.Outputs {
-		h.WriteCurrency(txn.Outputs[i].Value)
-		h.WriteHash(txn.Outputs[i].Address)
-	}
-	h.WriteCurrency(txn.MinerFee)
-	return h.Sum()
-}
-
-func (vc *ValidationContext) numTimestamps() int {
-	if vc.Index.Height+1 < uint64(len(vc.PrevTimestamps)) {
-		return int(vc.Index.Height + 1)
-	}
-	return len(vc.PrevTimestamps)
-}
-
-func (vc *ValidationContext) medianTimestamp() time.Time {
-	prevCopy := vc.PrevTimestamps
-	ts := prevCopy[:vc.numTimestamps()]
+func (s State) medianTimestamp() time.Time {
+	presopy := s.PrevTimestamps
+	ts := presopy[:s.numTimestamps()]
 	sort.Slice(ts, func(i, j int) bool { return ts[i].Before(ts[j]) })
 	if len(ts)%2 != 0 {
 		return ts[len(ts)/2]
@@ -168,182 +30,214 @@ func (vc *ValidationContext) medianTimestamp() time.Time {
 	return l.Add(r.Sub(l) / 2)
 }
 
-func (vc *ValidationContext) validateHeader(h sunyata.BlockHeader) error {
-	if h.Height != vc.Index.Height+1 {
+func (s State) validateHeader(h sunyata.BlockHeader) error {
+	if h.Height != s.Index.Height+1 {
 		return errors.New("wrong height")
-	} else if h.ParentID != vc.Index.ID {
+	} else if h.ParentID != s.Index.ID {
 		return errors.New("wrong parent ID")
-	} else if sunyata.WorkRequiredForHash(h.ID()).Cmp(vc.Difficulty) < 0 {
+	} else if sunyata.WorkRequiredForHash(h.ID()).Cmp(s.Difficulty) < 0 {
 		return errors.New("insufficient work")
-	} else if time.Until(h.Timestamp) > 2*time.Hour {
-		return ErrFutureBlock
-	} else if h.Timestamp.Before(vc.medianTimestamp()) {
+	} else if h.Timestamp.Before(s.medianTimestamp()) {
 		return errors.New("timestamp is too far in the past")
 	}
 	return nil
 }
 
-func (vc *ValidationContext) containsZeroValuedOutputs(txn sunyata.Transaction) bool {
-	for _, out := range txn.Outputs {
-		if out.Value.IsZero() {
-			return true
-		}
-	}
-	return false
-}
+func (s State) validateCurrencyValues(txn sunyata.Transaction) error {
+	// Add up all of the currency values in the transaction and check for
+	// overflow. This allows us to freely add any currency values in later
+	// validation functions without worrying about overflow.
 
-func (vc *ValidationContext) validTimeLocks(txn sunyata.Transaction) bool {
-	blockHeight := vc.Index.Height + 1
-	for _, in := range txn.Inputs {
-		if in.Parent.Timelock > blockHeight {
-			return false
-		}
-	}
-	return true
-}
-
-func (vc *ValidationContext) validPubkeys(txn sunyata.Transaction) bool {
-	for _, in := range txn.Inputs {
-		if in.PublicKey.Address() != in.Parent.Address {
-			return false
-		}
-	}
-	return true
-}
-
-func (vc *ValidationContext) outputsEqualInputs(txn sunyata.Transaction) bool {
-	var inputSum, outputSum sunyata.Currency
+	var sum sunyata.Currency
 	var overflowed bool
-	for _, in := range txn.Inputs {
-		inputSum, overflowed = inputSum.AddWithOverflow(in.Parent.Value)
-		if overflowed {
-			return false
+	add := func(x sunyata.Currency) {
+		if !overflowed {
+			sum, overflowed = sum.AddWithOverflow(x)
 		}
+	}
+
+	for _, in := range txn.Inputs {
+		add(in.Parent.Value)
+	}
+	for i, out := range txn.Outputs {
+		if out.Value.IsZero() {
+			return fmt.Errorf("output %v has zero value", i)
+		}
+		add(out.Value)
+	}
+	add(txn.MinerFee)
+	if overflowed {
+		return ErrOverflow
+	}
+	return nil
+}
+
+func (s State) validateTimeLocks(txn sunyata.Transaction) error {
+	blockHeight := s.Index.Height + 1
+	for i, in := range txn.Inputs {
+		if in.Parent.MaturityHeight > blockHeight {
+			return fmt.Errorf("input %v does not mature until block %v", i, in.Parent.MaturityHeight)
+		}
+	}
+	return nil
+}
+
+func (s State) outputsEqualInputs(txn sunyata.Transaction) error {
+	var totalIn, totalOut sunyata.Currency
+	for _, in := range txn.Inputs {
+		totalIn = totalIn.Add(in.Parent.Value)
 	}
 	for _, out := range txn.Outputs {
-		outputSum, overflowed = outputSum.AddWithOverflow(out.Value)
-		if overflowed {
-			return false
-		}
+		totalOut = totalOut.Add(out.Value)
 	}
-	outputSum, overflowed = outputSum.AddWithOverflow(txn.MinerFee)
-	return !overflowed && inputSum == outputSum
+	totalOut = totalOut.Add(txn.MinerFee)
+	if totalIn != totalOut {
+		return fmt.Errorf("inputs (%v C) do not equal outputs (%v C)", totalIn, totalOut)
+	}
+	return nil
 }
 
-func (vc *ValidationContext) validInputMerkleProofs(txn sunyata.Transaction) bool {
-	for _, in := range txn.Inputs {
-		if in.Parent.LeafIndex != sunyata.EphemeralLeafIndex && !vc.State.ContainsUnspentOutput(in.Parent) {
-			return false
+func (s State) validateStateProofs(txn sunyata.Transaction) error {
+	for i, in := range txn.Inputs {
+		switch {
+		case in.Parent.LeafIndex == sunyata.EphemeralLeafIndex:
+			continue
+		case s.Elements.ContainsUnspentOutputElement(in.Parent):
+			continue
+		case s.Elements.ContainsSpentOutputElement(in.Parent):
+			return fmt.Errorf("input %v double-spends output %v", i, in.Parent.ID)
+		default:
+			return fmt.Errorf("input %v spends output (%v) not present in the accumulator", i, in.Parent.ID)
 		}
 	}
-	return true
+	return nil
 }
 
-func (vc *ValidationContext) validSignatures(txn sunyata.Transaction) bool {
-	sigHash := vc.SigHash(txn)
-	for _, in := range txn.Inputs {
-		if !ed25519.Verify(in.PublicKey[:], sigHash[:], in.Signature[:]) {
-			return false
+func (s State) validateSpendPolicies(txn sunyata.Transaction) error {
+	sigHash := s.InputSigHash(txn)
+	for i, in := range txn.Inputs {
+		if in.PublicKey.Address() != in.Parent.Address {
+			return fmt.Errorf("input %v claims incorrect pubkey for parent address", i)
+		} else if !in.PublicKey.VerifyHash(sigHash, in.Signature) {
+			return fmt.Errorf("input %v has invalid signature", i)
 		}
 	}
-	return true
+	return nil
 }
 
 // ValidateTransaction partially validates txn for inclusion in a child block.
 // It does not validate ephemeral outputs.
-func (vc *ValidationContext) ValidateTransaction(txn sunyata.Transaction) error {
-	switch {
-	case vc.containsZeroValuedOutputs(txn):
-		return errors.New("transaction contains zero-valued outputs")
-	case !vc.validTimeLocks(txn):
-		return errors.New("transaction spends time-locked outputs")
-	case !vc.outputsEqualInputs(txn):
-		return errors.New("outputs of transaction do not equal its inputs")
-	case !vc.validPubkeys(txn):
-		return errors.New("transaction contains unlock conditions that do not hash to the correct address")
-	case !vc.validInputMerkleProofs(txn):
-		return ErrInvalidInputProof
-	case !vc.validSignatures(txn):
-		return errors.New("transaction contains an invalid signature")
+func (s State) ValidateTransaction(txn sunyata.Transaction) error {
+	// check proofs first; that way, subsequent checks can assume that all
+	// parent StateElements are valid
+	if err := s.validateStateProofs(txn); err != nil {
+		return err
+	}
+
+	if err := s.validateCurrencyValues(txn); err != nil {
+		return err
+	} else if err := s.validateTimeLocks(txn); err != nil {
+		return err
+	} else if err := s.outputsEqualInputs(txn); err != nil {
+		return err
+	} else if err := s.validateSpendPolicies(txn); err != nil {
+		return err
 	}
 	return nil
 }
 
-func (vc *ValidationContext) validEphemeralOutputs(txns []sunyata.Transaction) error {
-	// TODO: this is rather inefficient. Definitely need a better algorithm.
-	available := make(map[sunyata.OutputID]sunyata.Beneficiary)
-	for txnIndex, txn := range txns {
-		txid := txn.ID()
+func (s State) validateEphemeralOutputs(txns []sunyata.Transaction) error {
+	// skip this check if no ephemeral outputs are present
+	for _, txn := range txns {
 		for _, in := range txn.Inputs {
 			if in.Parent.LeafIndex == sunyata.EphemeralLeafIndex {
-				oid := in.Parent.ID
-				if out, ok := available[oid]; !ok {
-					return fmt.Errorf("transaction set is invalid: transaction %v claims a non-existent ephemeral output", txnIndex)
+				goto validate
+			}
+		}
+	}
+	return nil
+
+validate:
+	available := make(map[sunyata.ElementID]sunyata.Output)
+	for txnIndex, txn := range txns {
+		txid := txn.ID()
+		var index uint64
+		nextID := func() sunyata.ElementID {
+			id := sunyata.ElementID{
+				Source: sunyata.Hash256(txid),
+				Index:  index,
+			}
+			index++
+			return id
+		}
+
+		for _, in := range txn.Inputs {
+			if in.Parent.LeafIndex == sunyata.EphemeralLeafIndex {
+				if out, ok := available[in.Parent.ID]; !ok {
+					return fmt.Errorf("transaction set is invalid: transaction %v claims non-existent ephemeral output %v", txnIndex, in.Parent.ID)
 				} else if in.Parent.Value != out.Value {
-					return fmt.Errorf("transaction set is invalid: transaction %v claims wrong value for ephemeral output", txnIndex)
+					return fmt.Errorf("transaction set is invalid: transaction %v claims wrong value for ephemeral output %v", txnIndex, in.Parent.ID)
 				} else if in.Parent.Address != out.Address {
-					return fmt.Errorf("transaction set is invalid: transaction %v claims wrong address for ephemeral output", txnIndex)
+					return fmt.Errorf("transaction set is invalid: transaction %v claims wrong address for ephemeral output %v", txnIndex, in.Parent.ID)
 				}
-				delete(available, oid)
+				delete(available, in.Parent.ID)
 			}
 		}
-		for i, out := range txn.Outputs {
-			oid := sunyata.OutputID{
-				TransactionID: txid,
-				Index:         uint64(i),
-			}
-			available[oid] = out
+		for _, out := range txn.Outputs {
+			available[nextID()] = out
 		}
 	}
 	return nil
 }
 
-func (vc *ValidationContext) noDoubleSpends(txns []sunyata.Transaction) error {
-	spent := make(map[uint64]struct{})
-	for i := range txns {
-		for j := range txns[i].Inputs {
-			index := txns[i].Inputs[j].Parent.LeafIndex
-			if _, ok := spent[index]; ok && index != sunyata.EphemeralLeafIndex {
-				return fmt.Errorf("transaction set is invalid: transaction %v double-spends output %v", i, index)
+func (s State) noDoubleSpends(txns []sunyata.Transaction) error {
+	spent := make(map[sunyata.ElementID]int)
+	for i, txn := range txns {
+		for _, in := range txn.Inputs {
+			if prev, ok := spent[in.Parent.ID]; ok {
+				return fmt.Errorf("transaction set is invalid: transaction %v double-spends output %v (previously spent in transaction %v)", i, in.Parent.ID, prev)
 			}
-			spent[index] = struct{}{}
+			spent[in.Parent.ID] = i
 		}
 	}
 	return nil
 }
 
-// ValidateTransactionSet validates txns in their corresponding validation context.
-func (vc *ValidationContext) ValidateTransactionSet(txns []sunyata.Transaction) error {
-	if vc.BlockWeight(txns) > vc.MaxBlockWeight() {
+// ValidateTransactionSet validates txns within the context of s.
+func (s State) ValidateTransactionSet(txns []sunyata.Transaction) error {
+	if s.BlockWeight(txns) > s.MaxBlockWeight() {
 		return ErrOverweight
-	} else if err := vc.validEphemeralOutputs(txns); err != nil {
+	} else if err := s.validateEphemeralOutputs(txns); err != nil {
 		return err
-	} else if err := vc.noDoubleSpends(txns); err != nil {
+	} else if err := s.noDoubleSpends(txns); err != nil {
 		return err
 	}
 	for i, txn := range txns {
-		if err := vc.ValidateTransaction(txn); err != nil {
+		if err := s.ValidateTransaction(txn); err != nil {
 			return fmt.Errorf("transaction %v is invalid: %w", i, err)
 		}
 	}
 	return nil
 }
 
-// ValidateBlock validates b in the context of vc.
-func (vc *ValidationContext) ValidateBlock(b sunyata.Block) error {
+// ValidateBlock validates b in the context of s.
+//
+// This function does not check whether the header's timestamp is too far in the
+// future. This check should be performed at the time the block is received,
+// e.g. in p2p networking code; see MaxFutureTimestamp.
+func (s State) ValidateBlock(b sunyata.Block) error {
 	h := b.Header
-	if err := vc.validateHeader(h); err != nil {
+	if err := s.validateHeader(h); err != nil {
 		return err
-	} else if vc.Commitment(h.MinerAddress, b.Transactions) != h.Commitment {
+	} else if s.Commitment(h.MinerAddress, b.Transactions) != h.Commitment {
 		return errors.New("commitment hash does not match header")
-	} else if err := vc.ValidateTransactionSet(b.Transactions); err != nil {
+	} else if err := s.ValidateTransactionSet(b.Transactions); err != nil {
 		return err
 	}
 	return nil
 }
 
-// A Checkpoint pairs a block with the context used to validate its children.
-type Checkpoint struct {
-	Block   sunyata.Block
-	Context ValidationContext
+// MaxFutureTimestamp returns the maximum allowed timestamp for a block.
+func (s State) MaxFutureTimestamp(currentTime time.Time) time.Time {
+	return currentTime.Add(2 * time.Hour)
 }

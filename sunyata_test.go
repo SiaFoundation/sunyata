@@ -1,7 +1,6 @@
 package sunyata
 
 import (
-	"encoding/json"
 	"testing"
 )
 
@@ -30,36 +29,6 @@ func TestWork(t *testing.T) {
 	}
 }
 
-func TestCurrencyMarshalling(t *testing.T) {
-	tests := []struct {
-		value, str string
-	}{
-		{"0", "0"},
-		{"123000999", "0.123"},
-		{"120000999", "0.12"},
-		{"100000999", "0.1"},
-		{"99999999", "0.1"},
-		{"999999999", "1"},
-		{"1999999999", "2"},
-		{"12345678901234567890", "12345678901.235"},
-	}
-	for _, test := range tests {
-		c, err := ParseCurrency(test.value)
-		if err != nil {
-			t.Fatal(err)
-		} else if c.String() != test.str {
-			t.Error(c.String(), test.str)
-		}
-		if js, err := json.Marshal(c); err != nil {
-			t.Error(err)
-		} else if err := json.Unmarshal(js, &c); err != nil {
-			t.Error(err)
-		} else if c.String() != test.str {
-			t.Error(c.String(), test.str)
-		}
-	}
-}
-
 func BenchmarkWork(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
@@ -70,7 +39,7 @@ func BenchmarkWork(b *testing.B) {
 func BenchmarkTransactionID(b *testing.B) {
 	txn := Transaction{
 		Inputs:  make([]Input, 10),
-		Outputs: make([]Beneficiary, 10),
+		Outputs: make([]Output, 10),
 	}
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
