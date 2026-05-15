@@ -11,8 +11,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@ee0669bd1cc54295c223e0bb666b733df41de1c5 # v2.7.0
       - name: test
-        uses: n8maninger/action-golang-test@503bdd1b410aa26740cad03f1214abc8beef5496
+        uses: n8maninger/action-golang-test@aa292dc81b16d34406a9551e629e0cdca00d9418 # v2.2.1
         with:
           args: "-race"
